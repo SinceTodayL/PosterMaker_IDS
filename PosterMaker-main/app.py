@@ -283,9 +283,9 @@ class ImageGenerator:
 
             # 总结输出
             if optimizations_enabled:
-                print(f"✅ 已启用内存优化技术: {', '.join(optimizations_enabled)}")
+                print(f"已启用内存优化技术: {', '.join(optimizations_enabled)}")
             else:
-                print("⚠️ 无法启用任何内存优化技术（自定义管道或不兼容）")
+                print("无法启用任何内存优化技术（自定义管道或不兼容）")
 
         print("")  # 空行分隔日志
 
