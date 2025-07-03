@@ -35,3 +35,6 @@ stroke2vec
 *.bat
 *.safetensors
 *.pth
+
+*.jpg
+*.png
