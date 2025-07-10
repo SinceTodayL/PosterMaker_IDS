@@ -59,6 +59,12 @@ Stable Diffusion 中，会同时使用 `CLIP-1, CLIP-2, T5` 这几个模型，�
 
 
 
+* prepare_text_embeds
+
+这个也是处理文本 prompt的，作用？==TODO==
+
+
+
 * check_inputs
 
 属于前置输入校验层，检查文本输入、图像尺寸的一致性、合法性
@@ -96,3 +102,45 @@ mask 可以进行空间引导，用0/1表示，比如可以控制模型在哪一
 这个是函数从 `prompt` 生成图片的全流程
 
 函数中分步骤写出了整个流程，需要仔细阅读！
+
+`app.py` 中的使用：
+
+```Python
+pipeline = StableDiffusion3ControlNetPipeline(
+     scheduler=FlowMatchEulerDiscreteScheduler.from_config(
+            noise_scheduler.config
+            ),
+        vae=vae,
+        transformer=transformer,
+        text_encoder=text_encoder_one,
+        tokenizer=tokenizer_one,
+        text_encoder_2=text_encoder_two,
+        tokenizer_2=tokenizer_two,
+        text_encoder_3=text_encoder_three,
+        tokenizer_3=tokenizer_three,
+        controlnet_inpaint=controlnet_inpaint,
+        controlnet_text=controlnet_text,
+        adapter=adapter,
+    )
+```
+
+
+
+
+
+
+
+### app.py
+
+#### Function:  generate_image
+
+核心逻辑，函数首先检查输入图片的维度、格式，比如是否为 RGB或RGBA，如果是 RGBA 并且无 mask_image，就用 Alpha 通道做mask；如果是 RGB 格式的话，必须要有 mask_image，否则报错
+
+然后生成图像
+
+```Python
+generated_image = generator.generate(main_image, mask_image, texts_str, prompt, seed_generator)
+```
+
+同时还有很多类型检查，`isinstance` 函数很多
+

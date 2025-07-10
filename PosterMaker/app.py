@@ -646,11 +646,9 @@ def generate_image(main_image, mask_image, texts_str, prompt, seed):
                 return error_msg
             print(f"掩码图像处理完成，尺寸: {mask_image.size}")
 
-        print("创建随机种子生成器...")
         # 使用设定的seed
         seed_generator = torch.Generator(device=generator.device).manual_seed(int(seed))
         
-        print("调用图像生成器...")
         # 使用ImageGenerator生成图像
         generated_image = generator.generate(main_image, mask_image, texts_str, prompt, seed_generator)
         
@@ -887,7 +885,7 @@ with gr.Blocks() as iface:
         inputs=[texts_input, prompt_input, main_image_input, mask_image_input, seed_input]
     )
 
-    # 包装generate_image函数，添加更好的错误处理和日志
+    # 包装generate_image函数，添加错误处理和日志
     def generate_image_with_logging(main_image, mask_image, texts_str, prompt, seed):
         print("\n" + "="*50)
         print("图像生成流程启动")
