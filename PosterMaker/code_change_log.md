@@ -275,3 +275,41 @@ Step1: 将输入文字查表，转化成标准 IDS 结构
 Step2: 用 IDS 结构训练模型， TextRenderNet, Adapter (问题：优化目标是什么？是整个模型一块训练，还是将 TextRenderNet 单独拿出来训练？)
 
 * * 我们想要的通过 IDS 渲染出复杂汉字的方式，是不是一个单独的模型？
+
+
+
+>20250719
+
+转化为官方数据库，修改文件 `utils/ids_query.py` 
+
+使用方法：
+
+```python
+from utils.ids_query import IDSQuery
+ids_query = IDSQuery()
+result = ids_query.query_text(user_input)
+```
+
+输出类似于：
+
+```txt
+橋 
+[{'橋': {'simple': '⿰木喬', 'recursive': '⿰⿻⿻一丨𠆢⿱⿱⿱㇒⿻一人口⿵冂口'}}]
+单
+[{'单': {'simple': '⿱丷⿻甲一', 'recursive': '⿱⿰丶㇒⿻⿻⿴囗一丨一'}}]
+```
+
+simple 是只查找一步，recursive 是递归查找直到最简
+
+一个结构有多种分解方式的时候，默认采用第一种
+
+通过 `query_text` 方法调用的时候，会将英文字母全部忽略掉，输出没有英文字母，如果后面需要改，可以直接加
+
+```python
+for char in text:
+     if '\u4e00' <= char <= '\u9fff':  # Chinese characters only
+            # QUERY
+```
+
+
+

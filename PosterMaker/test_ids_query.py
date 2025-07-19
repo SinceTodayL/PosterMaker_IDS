@@ -6,7 +6,6 @@ from utils.ids_query import IDSQuery
 
 
 def main():
-    """Main test function"""
     ids_query = IDSQuery()
     
     while True:

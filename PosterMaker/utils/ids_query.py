@@ -31,69 +31,56 @@ class IDSQuery:
         self._load_ids_data()
     
     def _load_ids_data(self):
-        """Load IDS data from file"""
-        # Check if file exists
+        """
+        Load IDS data from the Unicode IDS database file (ids_database.txt).
+        This method is specifically designed to parse the official Unicode format.
+        Format per line: U+CODE\tCHAR\t^IDS1$(SOURCE1)\t^IDS2$(SOURCE2)...
+        """
+        self.ids_file_path = Path("ids/ids_database.txt")
+        
         if not self.ids_file_path.exists():
-            backup_paths = [
-                Path("ids/cjkvi-ids/ids.txt"),
-                Path("ids/GB2312-ids.txt"),
-                Path("./ids/ids.txt")
-            ]
-            
-            for backup_path in backup_paths:
-                if backup_path.exists():
-                    self.ids_file_path = backup_path
-                    break
-            else:
-                raise FileNotFoundError(f"IDS data file not found: {self.ids_file_path}")
+            raise FileNotFoundError(f"IDS data file not found: {self.ids_file_path}")
         
         try:
-            encodings = ['utf-8', 'utf-8-sig', 'gb2312', 'gbk']
-            
-            for encoding in encodings:
-                try:
-                    with open(self.ids_file_path, 'r', encoding=encoding) as f:
-                        for line in f:
-                            line = line.strip()
-                            
-                            if not line or line.startswith('#'):
-                                continue
-                            
-                            parts = line.split('\t')
-                            if len(parts) < 3:
-                                parts = line.split(' ', 2)
-                                if len(parts) < 3:
-                                    continue
-                            
-                            try:
-                                char = parts[1].strip()
-                                if not char or len(char) != 1:
-                                    continue
-                                
-                                ids_list = []
-                                for i in range(2, len(parts)):
-                                    ids_raw = parts[i].strip()
-                                    if ids_raw:
-                                        ids_clean = re.sub(r'\[[A-Z]+\]', '', ids_raw).strip()
-                                        if ids_clean and ids_clean != char and len(ids_clean) > 0:
-                                            if self._is_valid_ids(ids_clean):
-                                                ids_list.append(ids_clean)
-                                
-                                if ids_list:
-                                    self.char_to_ids[char] = ids_list
-                                    
-                            except Exception:
-                                continue
+            # The official file is UTF-8
+            with open(self.ids_file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#') or line.startswith(';'):
+                        continue
+                    
+                    # Ensure it's a valid data line
+                    if not line.startswith('U+'):
+                        continue
+
+                    parts = line.split('\t')
+                    if len(parts) < 3:
+                        continue
+
+                    char = parts[1].strip()
+                    if not char or len(char) != 1:
+                        continue
+
+                    if char not in self.char_to_ids:
+                        self.char_to_ids[char] = []
+
+                    # Process each IDS sequence for the character
+                    for i in range(2, len(parts)):
+                        ids_part = parts[i].strip()
                         
-                        return
-                        
-                except UnicodeDecodeError:
-                    continue
-            
-            raise Exception("Failed to decode file with any encoding")
-        
+                        # Extract the core IDS sequence, which is between ^ and $
+                        match = re.search(r'\^(.+?)\$', ids_part)
+                        if match:
+                            ids_clean = match.group(1)
+                            
+                            # Add to list if it's a valid, new decomposition
+                            if self._is_valid_ids(ids_clean) and ids_clean not in self.char_to_ids[char]:
+                                self.char_to_ids[char].append(ids_clean)
+
         except Exception as e:
-            raise Exception(f"Error loading IDS data: {e}")
+            raise Exception(f"Error loading IDS data from {self.ids_file_path}: {e}")
     
     def _is_valid_ids(self, ids: str) -> bool:
         """Check if IDS sequence is valid"""
