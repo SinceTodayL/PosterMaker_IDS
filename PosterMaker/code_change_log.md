@@ -274,3 +274,5 @@ result = ids_query.query_text('同济大学')
 **Why: ** 分解文字为 ids 结构，分为简单查询和递归查询
 
 **Note: ** 没有影响原模型的结构；主目录下`test_ids_query.py` 为测试文件，后续应删除
+
+另：添加 ids 文件夹存放 ids 数据库
