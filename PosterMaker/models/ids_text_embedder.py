@@ -122,7 +122,7 @@ class IDSTextEmbedder(nn.Module):
     def encode_single_text(self, text_content: str, max_length: int = None) -> Dict[str, torch.Tensor]:
         """Encode a single text string to IDS tokens"""
         if max_length is None:
-            max_length = 128  # Allow longer sequences
+            max_length = 128
             
         encoding = self.tokenizer.encode_text(
             text_content, 
@@ -140,7 +140,6 @@ class IDSTextEmbedder(nn.Module):
     def forward(self, texts: List[Dict[str, Any]]) -> torch.Tensor:
         """
         Forward pass of IDS Text Embedder
-        Note: No torch.no_grad() to ensure proper gradient flow during training
         """
         device = next(self.parameters()).device
         
@@ -260,7 +259,7 @@ class IDSTextEmbedder(nn.Module):
         
         # Add feature expansion to reach 1472 dimensions
         # This could be achieved through learned projection or feature augmentation
-        expansion_dim = 1472 - 128  # 1344 additional dimensions
+        expansion_dim = 1472 - 128
         
         # Simple approach: learn a projection from 128 to 1472
         if not hasattr(self, 'feature_expander'):

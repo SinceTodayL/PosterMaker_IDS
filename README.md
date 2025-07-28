@@ -12,7 +12,7 @@
 
 
 
-> 202507 11》
+> 202507 11
 
 准备添加 IDS 模块，改进 TextrenderNet 
 
@@ -155,3 +155,26 @@ for char in text:
 
 
 但实际上，现在要等原论文的 training code 发布才能继续了，还是要看看原论文的训练方式，才能在自己的模块上继续训练
+
+
+
+>2025 0728-
+
+现在的难题：
+
+如何设计训练代码？：看开源项目，已经开源的代码部分。
+
+数据集是什么呢？：爬虫，收集海报？？？ 是否一定需要海报数据？
+
+使用 LoRA 方式微调，还是直接在原来模型参数的基础上调整？
+
+
+
+**Try1: LoRA 微调**
+
+需要微调的权重: ControlNet 和 Adapter
+
+a) controlnet_text 内部的 transformer_blocks 及 controlnet_blocks
+
+b) LinearAdapterWithLayerNorm
+
