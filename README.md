@@ -178,3 +178,9 @@ a) controlnet_text 内部的 transformer_blocks 及 controlnet_blocks
 
 b) LinearAdapterWithLayerNorm
 
+
+
+**Try2: 全参数微调**
+
+按照两阶段方式训练
+

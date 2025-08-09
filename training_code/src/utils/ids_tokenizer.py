@@ -1,6 +1,7 @@
 """
 IDS Tokenizer for converting IDS sequences to token arrays
 Optimized for LoRA training with enhanced rare character support
+Modified for configurable paths in training pipeline
 """
 
 import json
@@ -8,7 +9,7 @@ import logging
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 import torch
-from utils.ids_query import IDSQuery
+from .ids_query import IDSQuery
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -22,18 +23,19 @@ class IDSTokenizer:
     Optimized for LoRA training with enhanced rare character support
     """
     
-    def __init__(self, vocab_file: Optional[str] = r'.\assets\ids_vocab.json', 
+    def __init__(self, ids_database_path: str, vocab_file: Optional[str] = None, 
                  build_vocab: bool = False, 
                  preserve_rare_chars: bool = True):
         """
         Initialize IDS tokenizer
         
         Args:
+            ids_database_path: Path to IDS database file (ids_database.txt)
             vocab_file: Path to existing vocabulary file
             build_vocab: Whether to build vocabulary from IDS data
             preserve_rare_chars: Whether to preserve rare characters (recommended: True)
         """
-        self.ids_query = IDSQuery()
+        self.ids_query = IDSQuery(ids_database_path)
         
         # Special tokens with consistent IDs
         self.special_tokens = {
@@ -528,4 +530,4 @@ class IDSTokenizer:
             
         except Exception as e:
             logger.error(f"Error validating encoding: {e}")
-            return False 
+            return False

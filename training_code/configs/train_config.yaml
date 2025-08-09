@@ -1,0 +1,46 @@
+# Configuration for the PosterMaker IDS-based training pipeline
+
+# --- Path Settings ---
+# Relative path to the original PosterMaker project directory
+poster_maker_dir: "../PosterMaker" 
+# Path to the dataset root (relative to training_code directory)
+dataset_dir: "./dataset" 
+# Directory for all training outputs (checkpoints, logs, samples)
+output_dir: "./training_output"
+
+# --- Pretrained Weights Paths (relative to poster_maker_dir) ---
+sd3_model_path: "checkpoints/stable-diffusion-3-medium-diffusers"
+scene_gen_net_path: "checkpoints/ours_weights/scenegen_net-0415.pth"  
+original_textrender_net_path: "checkpoints/ours_weights/textrender_net-0415.pth"
+# Note: adapter weights are included in textrender_net_path, not a separate file
+
+# --- Assets Paths (relative to poster_maker_dir) ---
+ids_database_path: "ids/ids_database.txt"
+ids_vocab_path: "assets/ids_vocab.json"  # Pre-built vocabulary file (optional)
+char2feat_path: "assets/char2feat_ppocr_neck64_avg.pth"  # Pre-trained character features
+vocab_path: "assets/ids_vocab.json"  # Vocabulary file path for backward compatibility
+
+# --- Training Hyperparameters ---
+stage1:
+  learning_rate: 1.0e-4
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  num_train_epochs: 20
+  embedding_dim: 64
+  max_seq_length: 128
+  save_steps: 1000
+  validation_steps: 100  # Validate every 100 steps
+  use_amp: True
+  lr_scheduler_type: "cosine"
+  lr_warmup_steps: 500
+  
+  # Additional training parameters
+  max_grad_norm: 1.0        # Gradient clipping
+  weight_decay: 0.01        # AdamW weight decay
+  adam_beta1: 0.9          # Adam beta1
+  adam_beta2: 0.999        # Adam beta2
+  adam_epsilon: 1.0e-8     # Adam epsilon
+
+# --- General Settings ---
+project_name: "PosterMaker_IDS_Upgrade"
+seed: 42

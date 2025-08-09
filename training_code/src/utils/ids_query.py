@@ -1,6 +1,7 @@
 """
 Chinese Character IDS (Ideographic Description Sequences) Query Interface
 Optimized for LoRA training with improved error handling and logging
+Modified for configurable paths in training pipeline
 """
 
 import re
@@ -20,14 +21,14 @@ class IDSQuery:
     Optimized for training workflows
     """
     
-    def __init__(self, ids_file_path: str = "ids/ids.txt"):
+    def __init__(self, ids_database_path: str):
         """
         Initialize IDS query interface
         
         Args:
-            ids_file_path: Path to IDS data file
+            ids_database_path: Path to IDS database file (ids_database.txt)
         """
-        self.ids_file_path = Path(ids_file_path)
+        self.ids_database_path = Path(ids_database_path)
         self.char_to_ids = {}
         
         # IDS structural descriptors (12 official IDCs)
@@ -50,10 +51,8 @@ class IDSQuery:
         This method is specifically designed to parse the official Unicode format.
         Format per line: U+CODE\tCHAR\t^IDS1$(SOURCE1)\t^IDS2$(SOURCE2)...
         """
-        self.ids_file_path = Path("ids/ids_database.txt")
-        
-        if not self.ids_file_path.exists():
-            error_msg = f"IDS data file not found: {self.ids_file_path}"
+        if not self.ids_database_path.exists():
+            error_msg = f"IDS data file not found: {self.ids_database_path}"
             logger.error(error_msg)
             raise FileNotFoundError(error_msg)
         
@@ -62,7 +61,7 @@ class IDSQuery:
             chars_processed = 0
             sequences_processed = 0
             
-            with open(self.ids_file_path, 'r', encoding='utf-8') as f:
+            with open(self.ids_database_path, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.strip()
                     
@@ -120,7 +119,7 @@ class IDSQuery:
             logger.info(f"  Avg sequences per char: {self.stats['avg_sequences_per_char']:.2f}")
 
         except Exception as e:
-            error_msg = f"Error loading IDS data from {self.ids_file_path}: {e}"
+            error_msg = f"Error loading IDS data from {self.ids_database_path}: {e}"
             logger.error(error_msg)
             raise Exception(error_msg)
     
@@ -404,4 +403,4 @@ class IDSQuery:
             'covered_chars': len(covered_chars),
             'coverage_ratio': len(covered_chars) / total_chars,
             'uncovered_chars': list(set(uncovered_chars))  # Remove duplicates
-        } 
+        }

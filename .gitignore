@@ -38,3 +38,6 @@ stroke2vec
 
 *.jpg
 *.png
+
+lab/
+.cursorignore

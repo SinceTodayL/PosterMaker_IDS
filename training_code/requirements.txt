@@ -1,0 +1,32 @@
+# Requirements for PosterMaker IDS-based training pipeline
+# Core ML and training dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.43.3
+diffusers>=0.29.2
+accelerate>=0.33.0
+
+# Data processing and utilities
+numpy>=1.26.4
+opencv-python>=4.5.4.60
+Pillow>=8.0.0
+
+# Configuration and logging
+PyYAML>=6.0
+pydantic>=2.7.3
+
+# Training and progress tracking
+tqdm>=4.64.0
+tensorboard>=2.10.0
+wandb>=0.15.0
+
+# Optional: for advanced features
+tokenizers>=0.19.1
+sentencepiece>=0.1.99
+
+# Additional training dependencies
+matplotlib>=3.5.0  # For plotting training curves
+seaborn>=0.11.0    # For advanced visualizations
+
+# Visual validation dependencies
+torchvision>=0.15.0  # For image saving and processing utilities
