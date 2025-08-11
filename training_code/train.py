@@ -29,7 +29,6 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     
-    # For deterministic behavior (may impact performance slightly)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
@@ -97,7 +96,7 @@ def main():
     poster_maker_dir = config['poster_maker_dir']
     ids_database_path = os.path.join(poster_maker_dir, config['ids_database_path'])
     
-    ids_query_instance = IDSQuery(ids_file_path=ids_database_path)
+    ids_query_instance = IDSQuery(ids_database_path=ids_database_path)
     
     # Check for vocabulary file
     vocab_file = None
@@ -111,7 +110,8 @@ def main():
     
     # Initialize tokenizer
     tokenizer = IDSTokenizer(
-        ids_query_instance=ids_query_instance,
+        # ids_query_instance=ids_query_instance,
+        ids_database_path=ids_database_path,
         vocab_file=vocab_file,
         build_vocab=(vocab_file is None)
     )

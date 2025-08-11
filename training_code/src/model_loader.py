@@ -73,7 +73,7 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
     text_render_net = SD3ControlNetModel.from_transformer(
         transformer, 
         num_layers=transformer.config.num_layers,
-        additional_in_channel=1,  # For inpainting mask
+        # additional_in_channel=1,  # For inpainting mask
         load_weights_from_transformer=True
     )
     
