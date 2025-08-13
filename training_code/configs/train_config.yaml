@@ -1,6 +1,6 @@
 # Configuration for the PosterMaker IDS-based training pipeline
 
-# --- Path Settings ---
+# Path Settings
 # Relative path to the original PosterMaker project directory
 poster_maker_dir: "../PosterMaker" 
 # Path to the dataset root (relative to training_code directory)
@@ -20,7 +20,7 @@ ids_vocab_path: "assets/ids_vocab.json"  # Pre-built vocabulary file (optional)
 char2feat_path: "assets/char2feat_ppocr_neck64_avg.pth"  # Pre-trained character features
 vocab_path: "assets/ids_vocab.json"  # Vocabulary file path for backward compatibility
 
-# --- Training Hyperparameters ---
+# Training Hyperparameters
 stage1:
   learning_rate: 1.0e-4
   batch_size: 1

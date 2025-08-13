@@ -184,3 +184,64 @@ b) LinearAdapterWithLayerNorm
 
 按照两阶段方式训练
 
+
+
+>2025 0812- 
+>
+>训练代码pipeline构建和阅读
+
+`utils/text_utils.py`\ `utils/utils.py`
+
+* **get_positional_encoding()**
+
+transformer 经典公式添加位置编码，形状 (max_len, d_model)
+
+* **create_text_mask()**
+
+根据 `x1, y1, x2, y2` 来确定一个掩码图
+
+* **mask_image_region()**
+
+将掩码图掩码位置填充一个参数值
+
+* **validate_text_annotation()**
+
+检验训练数据集中的 json 是否合法，返回值为 bool
+
+* **convert_to_rgb()**
+
+将 RGBA 图片转化为 RGB 格式
+
+* **cal_resize_and_padding()**
+* **reisize_box_by_scale()**
+
+按模型输入尺寸的要求缩放图片、边框，会有取整的误差问题
+
+* **pad_image_to_shape()**
+
+用 padding_value 补全剩余图像
+
+* **clamp_bbox_to_image()**
+
+限制 `x1, y1, x2, y2` 不超过图像边框
+
+* **save_image()**
+
+按照 image_path 保存图像
+
+* **post_process()**
+
+对模型输出结果图像进行裁剪
+
+* **get_char_features_by_text()**
+
+`char_padding_num`: 统一对齐到的**最大字符数**（序列长度）
+
+从 dict 类型变量 `char2feat` 中读取文字对应的特征，返回对应的特征向量，和一个 `token_mask` 标注哪些是字符，哪些是填充值
+
+
+
+`utils/ids_query.py` \ `utils/ids_tokenizer.py`
+
+这两个类是 ids 的核心，其中 `ids_query` 将汉字转化为 ids 序列，然后 `ids_tokenizer` 将其数字化，为后续转化为 embedding 做准备
+

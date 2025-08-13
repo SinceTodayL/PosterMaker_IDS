@@ -349,8 +349,8 @@ def run_inference(args):
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
                 text_pos=text_pos
-            )
-            text_features = models['adapter'](text_embeds)
+            )  # (batch_size, 112, 128) - token-level features
+            text_features = models['adapter'](text_embeds)  # (batch_size, 112, 4096)
             logger.info(f"✓ Text features shape: {text_features.shape}")
         
         # Create conditioning image

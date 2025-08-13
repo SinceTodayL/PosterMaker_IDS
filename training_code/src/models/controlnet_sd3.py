@@ -14,6 +14,7 @@
 
 
 from dataclasses import dataclass
+import copy
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -339,11 +340,12 @@ class SD3ControlNetModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAd
         controlnet = cls.from_config(config)
 
         if load_weights_from_transformer:
-            controlnet.pos_embed.load_state_dict(transformer.pos_embed.state_dict())
-            controlnet.time_text_embed.load_state_dict(transformer.time_text_embed.state_dict())
-            controlnet.context_embedder.load_state_dict(transformer.context_embedder.state_dict())
-            controlnet.transformer_blocks.load_state_dict(transformer.transformer_blocks.state_dict())
-            controlnet.norm_out.load_state_dict(transformer.norm_out.state_dict())
-            controlnet.proj_out.load_state_dict(transformer.proj_out.state_dict())
+            # Use deep copies of modules to guarantee identical architectures and weight shapes
+            controlnet.pos_embed = copy.deepcopy(transformer.pos_embed)
+            controlnet.time_text_embed = copy.deepcopy(transformer.time_text_embed)
+            controlnet.context_embedder = copy.deepcopy(transformer.context_embedder)
+            controlnet.transformer_blocks = copy.deepcopy(transformer.transformer_blocks)
+            controlnet.norm_out = copy.deepcopy(transformer.norm_out)
+            controlnet.proj_out = copy.deepcopy(transformer.proj_out)
 
         return controlnet

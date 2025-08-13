@@ -20,7 +20,7 @@ class IDSQuery:
     Optimized for training workflows
     """
     
-    def __init__(self, ids_file_path: str = "ids/ids.txt"):
+    def __init__(self, ids_file_path: str = "ids/ids_database.txt"):
         """
         Initialize IDS query interface
         

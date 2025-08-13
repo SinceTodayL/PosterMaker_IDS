@@ -296,16 +296,16 @@ class Trainer:
                 attention_mask=batch['attention_mask'],
                 token_type_ids=batch['token_type_ids'],
                 text_pos=batch['text_pos']
-            )  # (batch_size, 128)
+            )  # (batch_size, 112, 128) - token-level features
             
             # Transform through adapter to get conditioning features
-            text_features = self.models['adapter'](text_embeds)  # (batch_size, projection_dim)
+            text_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
             
         except Exception as e:
             logger.error(f"Error in text processing: {e}")
             # Fallback to zero conditioning
             text_features = torch.zeros(
-                latents.shape[0], 4096, 
+                latents.shape[0], 112, 4096, 
                 device=self.device, dtype=latents.dtype
             )
         
@@ -316,8 +316,8 @@ class Trainer:
                 conditioning_images = batch['conditioning_pixel_values']
                 
                 # Get ControlNet residuals
-                down_block_res_samples, mid_block_res_sample = self.models['text_render_net'](
-                    sample=noisy_latents,
+                controlnet_output = self.models['text_render_net'](
+                    hidden_states=noisy_latents,
                     timestep=timesteps,
                     encoder_hidden_states=text_features,
                     controlnet_cond=conditioning_images,
@@ -451,10 +451,10 @@ class Trainer:
                 attention_mask=val_batch['attention_mask'],
                 token_type_ids=val_batch['token_type_ids'],
                 text_pos=val_batch['text_pos']
-            )  # (batch_size, 128)
+            )  # (batch_size, 112, 128) - token-level features
             
             # Transform through adapter to get conditioning features
-            text_features = self.models['adapter'](text_embeds)  # (batch_size, projection_dim)
+            text_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
             
             # Prepare ControlNet conditioning
             controlnet_cond = val_batch['conditioning_pixel_values']  # (batch_size, 3, H, W)

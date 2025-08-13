@@ -174,9 +174,9 @@ class IDSTokenizer:
             vocab_data = json.load(f)
             
         # Check version compatibility
-        version = vocab_data.get('version', '1.0')
-        if version not in ['1.1', '1.2']:
-            logger.warning(f"Loading vocabulary version {version}, current version is 1.2")
+        # version = vocab_data.get('version', '1.0')
+        # if version not in ['1.1', '1.2']:
+            # logger.warning(f"Loading vocabulary version {version}, current version is 1.2")
             
         self.token_to_id = vocab_data['token_to_id']
         self.id_to_token = {int(v): k for k, v in self.token_to_id.items()}  # Ensure int keys
@@ -256,7 +256,7 @@ class IDSTokenizer:
     
     def encode_text(self, text: str, max_length: Optional[int] = None, 
                    add_special_tokens: bool = True, use_recursive: bool = False,
-                   enhance_rare_chars: bool = True) -> Dict:
+                   enhance_rare_chars: bool = False) -> Dict:
         """
         Encode text to IDS token sequence with rare character enhancement
         

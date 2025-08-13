@@ -130,8 +130,8 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
     logger.info(f"Initialized IDSTextEmbedder with vocab size: {ids_text_embedder.tokenizer.vocab_size}")
     
     # Initialize the Adapter
-    # The adapter transforms IDS embedder output (128D) to ControlNet input dimension
-    hidden_dim = 128  # Output dimension from IDSTextEmbedder (64 + 32 + 32)
+    # The adapter transforms IDS embedder token features (128D) to ControlNet input dimension
+    hidden_dim = 128  # Token feature dimension from IDSTextEmbedder (64 + 32 + 32)
     projection_dim = transformer.config.joint_attention_dim  # SD3 expects 4096D features
     
     adapter = LinearAdapterWithLayerNorm(

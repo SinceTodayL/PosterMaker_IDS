@@ -1,5 +1,9 @@
 """
 IDS-based Text Embedder for TextRenderNet
+
+"""
+
+"""
 Optimized for LoRA training and architectural improvements
 Modified for configurable paths in training pipeline
 """
@@ -454,7 +458,7 @@ class IDSTextEmbedder(nn.Module):
                                text_pos: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for batch of tokenized IDS sequences.
-        Simplified version that processes pre-tokenized inputs directly.
+        Fixed to maintain token-level structure matching original TextEmbedder.
         
         Args:
             input_ids: (batch_size, seq_len) tokenized IDS sequences
@@ -463,7 +467,7 @@ class IDSTextEmbedder(nn.Module):
             text_pos: (batch_size, 4) normalized text positions [x1, y1, x2, y2]
             
         Returns:
-            torch.Tensor: (batch_size, 128) text features for adapter
+            torch.Tensor: (batch_size, 112, 128) token-level features for ControlNet
         """
         batch_size = input_ids.shape[0]
         device = input_ids.device
@@ -475,32 +479,63 @@ class IDSTextEmbedder(nn.Module):
         if self.use_structural_attention:
             ids_embeddings = self.structural_attention(ids_embeddings, attention_mask)  # (batch_size, seq_len, embed_dim)
         
-        # 3. Pool sequence to get text-level features
-        # Use attention-weighted average pooling
-        attention_weights = attention_mask.unsqueeze(-1).float()  # (batch_size, seq_len, 1)
-        weighted_embeddings = ids_embeddings * attention_weights  # (batch_size, seq_len, embed_dim)
-        pooled_features = torch.sum(weighted_embeddings, dim=1) / torch.sum(attention_weights, dim=1)  # (batch_size, embed_dim)
+        # 3. Reshape to fixed token structure
+        # Pool/reshape the variable-length sequence to fixed 16 tokens per text
+        batch_features = []
         
-        # 4. Get positional encoding from text_pos
-        # Convert normalized coordinates to pixel coordinates for compatibility
-        pixel_coords = text_pos * self.input_size[0]  # Assuming square input
-        pos_encoding = get_positional_encoding(
-            pixel_coords.cpu().numpy(), 
-            d_model=32  # Positional encoding dimension
-        )
-        pos_encoding = torch.from_numpy(pos_encoding).float().to(device)  # (batch_size, 32)
+        for batch_idx in range(batch_size):
+            # Get single sequence
+            seq_embeddings = ids_embeddings[batch_idx]  # (seq_len, 64)
+            seq_mask = attention_mask[batch_idx]  # (seq_len,)
+            
+            # Pool to fixed length (16 tokens)
+            pooled_seq, _ = self._pool_ids_sequence(seq_embeddings, seq_mask)  # (16, 64)
+            
+            # Add character-level positional encoding
+            char_pos_encoding = get_positional_encoding(
+                self.char_padding_to_len, self.char_pos_encoding_dim
+            ).to(device)  # (16, 32)
+            
+            # Combine with char positional encoding
+            char_features = torch.cat([
+                pooled_seq,  # (16, 64)
+                char_pos_encoding  # (16, 32)
+            ], dim=-1)  # (16, 96)
+            
+            # Add text-level positional encoding
+            coords = pos2coords(text_pos[batch_idx].cpu().numpy())  # Convert to xywh
+            coords_norm = normalize_coordinates(coords, self.input_size[1], self.input_size[0])
+            text_coords_embed = self.fourier_embedder(torch.tensor(coords_norm, device=device))  # (32,)
+            text_coords_embed = text_coords_embed.unsqueeze(0).repeat(self.char_padding_to_len, 1)  # (16, 32)
+            
+            # Final features for this text
+            text_features = torch.cat([
+                char_features,  # (16, 96)
+                text_coords_embed  # (16, 32)
+            ], dim=-1)  # (16, 128)
+            
+            batch_features.append(text_features)
         
-        # 5. Combine features: pooled IDS features + positional encoding
-        # Ensure dimensions match: 64 (IDS) + 32 (pos) + 32 (extra) = 128
-        extra_features = torch.zeros(batch_size, 32, device=device)  # Placeholder for future extensions
+        # 4. Assemble to match original TextEmbedder output format
+        batch_outputs = []
+        for batch_idx in range(batch_size):
+            # Create output matching (112, 128) structure
+            max_token_num = self.char_padding_to_len * self.max_num_texts  # 16 * 7 = 112
+            
+            # Use single text (can be extended for multiple texts later)
+            text_features = batch_features[batch_idx]  # (16, 128)
+            
+            # Pad to full 112 tokens
+            padding_token_num = max_token_num - self.char_padding_to_len  # 112 - 16 = 96
+            padding_features = torch.zeros((padding_token_num, 128), device=device)
+            
+            full_features = torch.cat([text_features, padding_features], dim=0)  # (112, 128)
+            batch_outputs.append(full_features)
         
-        combined_features = torch.cat([
-            pooled_features,  # (batch_size, 64)
-            pos_encoding,     # (batch_size, 32) 
-            extra_features    # (batch_size, 32)
-        ], dim=-1)  # (batch_size, 128)
+        # Stack batch
+        batch_tensor = torch.stack(batch_outputs, dim=0)  # (batch_size, 112, 128)
         
-        return combined_features
+        return batch_tensor
     
     def get_lora_target_modules(self) -> List[str]:
         """Return module names that should be targeted by LoRA"""

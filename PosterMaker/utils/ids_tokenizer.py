@@ -254,7 +254,7 @@ class IDSTokenizer:
     
     def encode_text(self, text: str, max_length: Optional[int] = None, 
                    add_special_tokens: bool = True, use_recursive: bool = False,
-                   enhance_rare_chars: bool = True) -> Dict:
+                   enhance_rare_chars: bool = False) -> Dict:
         """
         Encode text to IDS token sequence with rare character enhancement
         
