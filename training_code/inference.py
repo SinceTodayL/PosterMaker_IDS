@@ -82,27 +82,37 @@ def create_tokenizer(config: Dict[str, Any]) -> IDSTokenizer:
     Returns:
         Configured IDSTokenizer
     """
-    poster_maker_dir = Path(config['poster_maker_dir'])
-    ids_database_path = poster_maker_dir / config['ids_database_path']
-    
-    # Initialize IDS query
-    ids_query_instance = IDSQuery(ids_file_path=str(ids_database_path))
+    # Get paths based on updated configuration
+    if config['ids_database_path'].startswith('./'):
+        # IDS database path is relative to training_code
+        ids_database_path = Path(config['ids_database_path'])
+    else:
+        # IDS database path is relative to poster_maker_dir (legacy support)
+        poster_maker_dir = Path(config['poster_maker_dir'])
+        ids_database_path = poster_maker_dir / config['ids_database_path']
     
     # Check for vocabulary file
     vocab_file = None
     if 'ids_vocab_path' in config:
-        vocab_path = poster_maker_dir / config['ids_vocab_path']
+        if config['ids_vocab_path'].startswith('./'):
+            # Vocabulary path is relative to training_code
+            vocab_path = Path(config['ids_vocab_path'])
+        else:
+            # Vocabulary path is relative to poster_maker_dir (legacy support)
+            poster_maker_dir = Path(config['poster_maker_dir'])
+            vocab_path = poster_maker_dir / config['ids_vocab_path']
+            
         if vocab_path.exists():
             vocab_file = str(vocab_path)
             logger.info(f"Using vocabulary file: {vocab_file}")
         else:
             logger.warning(f"Vocabulary file not found: {vocab_path}, will build from IDS database")
     
-    # Create tokenizer
+    # Create tokenizer with updated interface
     tokenizer = IDSTokenizer(
-        ids_query_instance=ids_query_instance,
+        ids_database_path=str(ids_database_path),
         vocab_file=vocab_file,
-        build_vocab=(vocab_file is None)
+        preserve_rare_chars=True
     )
     
     logger.info(f"✓ Tokenizer initialized with vocabulary size: {tokenizer.vocab_size}")
@@ -155,7 +165,7 @@ def prepare_text_inputs(text_json_path: str, tokenizer: IDSTokenizer, config: Di
             content,
             max_length=config['stage1']['max_seq_length'],
             add_special_tokens=True,
-            use_recursive=True
+            use_recursive=False
         )
         
         all_input_ids.append(tokenized['input_ids'])
@@ -271,22 +281,30 @@ def run_diffusion_inference(models: Dict[str, torch.nn.Module], text_features: t
             timestep = t.expand(latents.shape[0])
             
             # Get ControlNet guidance
-            down_block_res_samples, mid_block_res_sample = models['text_render_net'](
-                sample=latents,
+            # Prepare pooled projections (zeros) for SD3 embedding API
+            pooled_projection_dim = models['transformer'].config.pooled_projection_dim
+            pooled_zeros = torch.zeros(
+                latents.shape[0], pooled_projection_dim,
+                device=latents.device, dtype=latents.dtype
+            )
+
+            controlnet_output = models['text_render_net'](
+                hidden_states=latents, 
                 timestep=timestep,
                 encoder_hidden_states=text_features,
+                pooled_projections=pooled_zeros,
                 controlnet_cond=conditioning_image,
                 return_dict=False
             )
+            control_block_samples = controlnet_output[0]
             
             # Predict noise with main transformer
             noise_pred = models['transformer'](
                 hidden_states=latents,
                 timestep=timestep,
                 encoder_hidden_states=text_features,
-                pooled_projections=None,
-                down_block_additional_residuals=down_block_res_samples,
-                mid_block_additional_residual=mid_block_res_sample,
+                pooled_projections=pooled_zeros,
+                block_controlnet_hidden_states=control_block_samples,  # 注入ControlNet residuals
                 return_dict=False
             )[0]
             

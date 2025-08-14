@@ -44,6 +44,7 @@ class PosterDatasetStage1(Dataset):
         
         # Construct the absolute path to the dataset split directory
         self.data_root = os.path.join(config['dataset_dir'], split)
+        self.prompt_key = config.get('prompt_key', 'prompt')
         
         if not os.path.exists(self.data_root):
             raise FileNotFoundError(f"Dataset split directory not found: {self.data_root}")
@@ -105,6 +106,8 @@ class PosterDatasetStage1(Dataset):
                     self.stats['valid_annotations'] += 1
                     if not annotation['texts']:
                         self.stats['empty_text_samples'] += 1
+                    if self.prompt_key not in annotation or not annotation[self.prompt_key]:
+                        logger.warning(f"Prompt key '{self.prompt_key}' not found or empty in sample: {self.samples[i]}")
                 else:
                     logger.warning(f"Invalid annotation in sample: {self.samples[i]}")
                     
@@ -182,27 +185,31 @@ class PosterDatasetStage1(Dataset):
         mask_pil = Image.fromarray((mask_array.numpy() * 255).astype('uint8'), mode='L')
         return mask_pil
     
-    def _create_conditioning_image(self, image: Image.Image, text_pos: List[int]) -> Image.Image:
+    def _create_conditioning_image(self, image: Image.Image, text_positions: List[List[int]]) -> Image.Image:
         """
-        Create conditioning image by masking the text region.
+        Create conditioning image by masking the text regions.
         
         Args:
-            image: Original PIL image
-            text_pos: Text position [x1, y1, x2, y2]
+            image (Image.Image): Original PIL image.
+            text_positions (List[List[int]]): List of text positions [[x1, y1, x2, y2], ...].
             
         Returns:
-            PIL image with text region masked (filled with gray)
+            Image.Image: PIL image with text regions masked.
         """
         # Convert to tensor for processing
         image_tensor = self.image_transforms(image)
         
-        # Create mask for the text region
-        mask = create_text_mask([text_pos], (1024, 1024))  # Assuming resized to 1024x1024
+        # Return original image if no text to mask
+        if not text_positions:
+            return image
+
+        # Create mask for the text regions
+        mask = create_text_mask(text_positions, (1024, 1024))  # Assuming resized to 1024x1024
         
         # Mask the image (fill text region with neutral gray value 0.0 in [-1,1] range)
         conditioning_image_tensor = mask_image_region(image_tensor, mask, fill_value=self.mask_fill_value)
         
-        # Convert back to PIL for consistency (will be converted to tensor again later)
+        # Convert back to PIL for consistency
         # First convert from [-1,1] to [0,1]
         conditioning_array = ((conditioning_image_tensor + 1) / 2).permute(1, 2, 0).numpy()
         conditioning_array = (conditioning_array * 255).astype('uint8')
@@ -255,23 +262,36 @@ class PosterDatasetStage1(Dataset):
                 # 3. Create the conditioning mask for the text box
                 conditioning_mask_pil = self._create_text_conditioning_mask(pos, image.size)
                 
-                # 4. Create the conditioning image by masking the original image
-                conditioning_image = self._create_conditioning_image(image, pos)
+                # 4. Create conditioning images
+                # For SceneGenNet, we need an image with ALL text boxes masked.
+                all_text_positions = [t['pos'] for t in annotation.get('texts', [])]
+                scene_conditioning_image = self._create_conditioning_image(image, all_text_positions)
+                
+                # For TextRenderNet, we only mask the selected text box.
+                text_render_conditioning_image = self._create_conditioning_image(image, [pos])
                 
                 # 5. Tokenize the text content using the IDS tokenizer
+                # Use simple decomposition for training efficiency
                 tokenized_text = self.tokenizer.encode_text(
                     content,
                     max_length=self.max_seq_length,
                     add_special_tokens=True,
-                    use_recursive=True  # Use recursive for better structure understanding
+                    use_recursive=False,  # Simple decomposition for training efficiency
+                    enhance_rare_chars=False  # No complex enhancement for training
                 )
                 
                 # 6. Apply transformations to images
                 pixel_values = self.image_transforms(image)
-                conditioning_pixel_values = self.image_transforms(conditioning_image)
+                scene_conditioning_pixel_values = self.image_transforms(scene_conditioning_image)
+                text_render_conditioning_pixel_values = self.image_transforms(text_render_conditioning_image)
                 conditioning_mask = self.mask_transforms(conditioning_mask_pil)
                 
-                # 7. Prepare text position (normalized coordinates)
+                # 7. Get the prompt
+                prompt = annotation.get(self.prompt_key, "")
+                if not prompt:
+                    logger.debug(f"Sample {self.samples[idx]} has an empty prompt.")
+
+                # 8. Prepare text position (normalized coordinates)
                 # Normalize to [0, 1] range based on original image size
                 orig_width, orig_height = image.size
                 text_pos_normalized = [
@@ -282,15 +302,17 @@ class PosterDatasetStage1(Dataset):
                 ]
                 
                 return {
-                    "pixel_values": pixel_values,  # Ground truth image
-                    "conditioning_pixel_values": conditioning_pixel_values,  # Image with masked text
-                    "conditioning_mask": conditioning_mask,  # Binary mask indicating text region
+                    "pixel_values": pixel_values,
+                    "scene_conditioning_pixel_values": scene_conditioning_pixel_values,
+                    "text_render_conditioning_pixel_values": text_render_conditioning_pixel_values,
+                    "conditioning_mask": conditioning_mask,
                     "input_ids": torch.tensor(tokenized_text['input_ids'], dtype=torch.long),
                     "attention_mask": torch.tensor(tokenized_text['attention_mask'], dtype=torch.long), 
                     "token_type_ids": torch.tensor(tokenized_text['token_type_ids'], dtype=torch.long),
-                    "text_pos": torch.tensor(text_pos_normalized, dtype=torch.float32),  # Normalized position
-                    "text_content": content,  # Original text for debugging/logging
-                    "sample_id": self.samples[idx]  # Sample identifier for debugging
+                    "text_pos": torch.tensor(text_pos_normalized, dtype=torch.float32),
+                    "prompt": prompt,
+                    "text_content": content,
+                    "sample_id": self.samples[idx]
                 }
                 
             except Exception as e:
@@ -324,12 +346,14 @@ class PosterDatasetStage1(Dataset):
         
         return {
             "pixel_values": dummy_image,
-            "conditioning_pixel_values": dummy_image,
+            "scene_conditioning_pixel_values": dummy_image,
+            "text_render_conditioning_pixel_values": dummy_image,
             "conditioning_mask": dummy_mask,
             "input_ids": torch.tensor(dummy_encoding['input_ids'], dtype=torch.long),
             "attention_mask": torch.tensor(dummy_encoding['attention_mask'], dtype=torch.long),
             "token_type_ids": torch.tensor(dummy_encoding['token_type_ids'], dtype=torch.long),
             "text_pos": torch.tensor([0.25, 0.25, 0.75, 0.75], dtype=torch.float32),  # Center region
+            "prompt": "a dummy prompt for testing",
             "text_content": "测试",
             "sample_id": "dummy_sample"
         }
@@ -356,7 +380,8 @@ class PosterDatasetStage1(Dataset):
         """
         # Stack image tensors
         pixel_values = torch.stack([item["pixel_values"] for item in batch])
-        conditioning_pixel_values = torch.stack([item["conditioning_pixel_values"] for item in batch])
+        scene_conditioning_pixel_values = torch.stack([item["scene_conditioning_pixel_values"] for item in batch])
+        text_render_conditioning_pixel_values = torch.stack([item["text_render_conditioning_pixel_values"] for item in batch])
         conditioning_mask = torch.stack([item["conditioning_mask"] for item in batch])
         
         # Stack text data (already padded by tokenizer)
@@ -367,18 +392,21 @@ class PosterDatasetStage1(Dataset):
         # Stack position data
         text_pos = torch.stack([item["text_pos"] for item in batch])
         
-        # Keep text content and sample IDs as lists (not tensors)
+        # Keep prompt, text content and sample IDs as lists
+        prompts = [item["prompt"] for item in batch]
         text_content = [item["text_content"] for item in batch]
         sample_ids = [item["sample_id"] for item in batch]
         
         return {
             "pixel_values": pixel_values,
-            "conditioning_pixel_values": conditioning_pixel_values,
+            "scene_conditioning_pixel_values": scene_conditioning_pixel_values,
+            "text_render_conditioning_pixel_values": text_render_conditioning_pixel_values,
             "conditioning_mask": conditioning_mask,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "token_type_ids": token_type_ids,
             "text_pos": text_pos,
+            "prompt": prompts,
             "text_content": text_content,
             "sample_ids": sample_ids
         }

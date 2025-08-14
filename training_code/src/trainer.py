@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import os
 import logging
 import time
@@ -17,6 +17,12 @@ from tqdm import tqdm
 from tqdm.auto import tqdm as auto_tqdm
 import json
 from torchvision.utils import save_image
+from transformers import (
+    CLIPTextModelWithProjection,
+    CLIPTokenizer,
+    T5EncoderModel,
+    T5TokenizerFast,
+)
 
 from .model_loader import save_model_checkpoint, count_trainable_parameters
 
@@ -37,7 +43,7 @@ class Trainer:
     def __init__(self, 
                  config: Dict[str, Any],
                  models: Dict[str, torch.nn.Module],
-                 tokenizer,  # IDSTokenizer instance
+                 tokenizers: Dict[str, Any],
                  train_dataloader: DataLoader,
                  val_dataloader: DataLoader,
                  optimizer: torch.optim.Optimizer,
@@ -51,7 +57,7 @@ class Trainer:
         Args:
             config: Training configuration dictionary
             models: Dictionary containing all model components
-            tokenizer: IDS tokenizer for text processing
+            tokenizers: Dictionary containing tokenizers for text processing
             train_dataloader: Training data loader
             val_dataloader: Validation data loader  
             optimizer: Optimizer for trainable parameters
@@ -61,7 +67,7 @@ class Trainer:
         """
         self.config = config
         self.models = models
-        self.tokenizer = tokenizer
+        self.tokenizers = tokenizers
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.optimizer = optimizer
@@ -69,6 +75,15 @@ class Trainer:
         self.device = device
         self.scheduler = scheduler
         
+        # Unpack text encoders and tokenizers for convenience
+        self.text_encoder = self.models['text_encoder']
+        self.text_encoder_2 = self.models['text_encoder_2']
+        self.text_encoder_3 = self.models['text_encoder_3']
+        self.tokenizer = self.tokenizers['tokenizer']
+        self.tokenizer_2 = self.tokenizers['tokenizer_2']
+        self.tokenizer_3 = self.tokenizers['tokenizer_3']
+        self.tokenizer_max_length = self.tokenizer.model_max_length
+
         # Training state
         self.global_step = 0
         self.current_epoch = 0
@@ -150,6 +165,109 @@ class Trainer:
         logger.info(f"Total: {total_trainable:,} trainable / {total_params:,} total ({total_trainable/total_params*100:.1f}%)")
         logger.info("=" * 50)
     
+    #
+    # ----------------- Prompt Encoding Logic (Copied and Adapted from pipeline_sd3.py) -----------------
+    #
+    
+    @torch.no_grad()
+    def _get_t5_prompt_embeds(
+        self, prompt: List[str], num_images_per_prompt: int = 1
+    ):
+        """Helper to get T5 prompt embeds."""
+        # Run on the text encoder's device to avoid moving encoders to GPU
+        device = next(self.text_encoder_3.parameters()).device
+        text_inputs = self.tokenizer_3(
+            prompt,
+            padding="max_length",
+            max_length=self.tokenizer_max_length,
+            truncation=True,
+            add_special_tokens=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids
+        
+        prompt_embeds = self.text_encoder_3(text_input_ids.to(device))[0]
+        dtype = self.text_encoder_3.dtype
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+
+        return prompt_embeds
+
+    @torch.no_grad()
+    def _get_clip_prompt_embeds(
+        self, prompt: List[str], num_images_per_prompt: int = 1, clip_model_index: int = 0
+    ):
+        """Helper to get CLIP prompt embeds."""
+        # Run on the text encoder's device to avoid moving encoders to GPU
+        device = next(self.text_encoder.parameters()).device
+        clip_tokenizers = [self.tokenizer, self.tokenizer_2]
+        clip_text_encoders = [self.text_encoder, self.text_encoder_2]
+
+        tokenizer = clip_tokenizers[clip_model_index]
+        text_encoder = clip_text_encoders[clip_model_index]
+
+        text_inputs = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=self.tokenizer_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        text_input_ids = text_inputs.input_ids
+        prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
+        pooled_prompt_embeds = prompt_embeds[0]
+        prompt_embeds = prompt_embeds.hidden_states[-2] # last-but-one layer
+
+        # Move embeddings to main training device with the dtype used by transformer
+        main_device = self.device
+        main_dtype = self.models['transformer'].dtype
+        prompt_embeds = prompt_embeds.to(dtype=main_dtype, device=main_device)
+        pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=main_dtype, device=main_device)
+        return prompt_embeds, pooled_prompt_embeds
+
+    @torch.no_grad()
+    def _encode_prompt(
+        self,
+        prompt: List[str],
+        prompt_2: Optional[List[str]] = None,
+        prompt_3: Optional[List[str]] = None,
+        device: Optional[torch.device] = None,
+        num_images_per_prompt: int = 1,
+    ):
+        """
+        Encodes the prompt into text embeddings. This is a simplified version of the
+        encode_prompt function from the original pipeline, adapted for training.
+        """
+        device = device or self.device
+
+        # Handle optional prompts
+        prompt_2 = prompt_2 or prompt
+        prompt_3 = prompt_3 or prompt
+
+        # Get CLIP embeddings
+        prompt_embed, pooled_prompt_embed = self._get_clip_prompt_embeds(
+            prompt=prompt, num_images_per_prompt=num_images_per_prompt, clip_model_index=0
+        )
+        prompt_2_embed, pooled_prompt_2_embed = self._get_clip_prompt_embeds(
+            prompt=prompt_2, num_images_per_prompt=num_images_per_prompt, clip_model_index=1
+        )
+        clip_prompt_embeds = torch.cat([prompt_embed, prompt_2_embed], dim=-1)
+
+        # Get T5 embeddings
+        t5_prompt_embed = self._get_t5_prompt_embeds(
+            prompt=prompt_3, num_images_per_prompt=num_images_per_prompt,
+        )
+        
+        # Pad CLIP embeds to match T5 embeds
+        clip_prompt_embeds = torch.nn.functional.pad(
+            clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
+        )
+
+        prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed.to(device=self.device, dtype=clip_prompt_embeds.dtype)], dim=-2)
+        pooled_prompt_embeds = torch.cat([pooled_prompt_embed, pooled_prompt_2_embed], dim=-1)
+
+        return prompt_embeds, pooled_prompt_embeds
+
     def train(self):
         """The main training loop."""
         print("Starting Stage 1 training...")
@@ -160,6 +278,11 @@ class Trainer:
             for step, batch in enumerate(self.train_dataloader):
                 with torch.cuda.amp.autocast(enabled=self.config['stage1']['use_amp']):
                     loss = self._train_step(batch)
+                    
+                    # 跳过返回None的batch（数据处理失败的情况）
+                    if loss is None:
+                        logger.warning(f"Skipping batch {step} due to processing error")
+                        continue
                     loss = loss / self.config['stage1']['gradient_accumulation_steps']
 
                 # Backward pass
@@ -206,6 +329,7 @@ class Trainer:
         self.models['vae'].eval()
         self.models['transformer'].eval()
         self.models['text_render_net'].eval()
+        self.models['scene_gen_net'].eval()
         
         epoch_losses = []
         progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {self.current_epoch + 1}")
@@ -253,6 +377,31 @@ class Trainer:
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
                 batch[key] = value.to(self.device)
+        # Ensure correct dtypes for tokenized inputs to avoid overflows
+        for key in ["input_ids", "token_type_ids", "attention_mask"]:
+            if key in batch and isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(dtype=torch.long, device=self.device)
+        if "attention_mask" in batch and isinstance(batch["attention_mask"], torch.Tensor):
+            batch["attention_mask"] = batch["attention_mask"].clamp(min=0, max=1)
+        if "text_pos" in batch and isinstance(batch["text_pos"], torch.Tensor):
+            batch["text_pos"] = batch["text_pos"].to(dtype=torch.float32, device=self.device)
+        
+        # Also move prompt if it's a list of strings
+        if "prompt" in batch and isinstance(batch["prompt"], list):
+            # The prompt itself is not a tensor, it will be processed by the tokenizer
+            pass
+
+        # Clamp token ids to valid ranges to avoid int64 overflow or embedding OOB
+        try:
+            if "input_ids" in batch and isinstance(batch["input_ids"], torch.Tensor):
+                vocab_size = getattr(self.models['ids_text_embedder'].tokenizer, 'vocab_size', None)
+                if vocab_size is not None:
+                    batch["input_ids"] = batch["input_ids"].clamp_(min=0, max=vocab_size - 1)
+            if "token_type_ids" in batch and isinstance(batch["token_type_ids"], torch.Tensor):
+                batch["token_type_ids"] = batch["token_type_ids"].clamp_(min=0, max=1)
+        except Exception as _:
+            # Safe guard: if clamping fails due to dtype or missing attributes, continue
+            pass
         
         # Forward pass through the complete pipeline
         loss = self._forward_pass(batch)
@@ -288,57 +437,87 @@ class Trainer:
         # 3. Add noise to latents (forward diffusion process)
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
         
-        # 4. Get text conditioning from our new IDS-based modules
+        # 4. Get text conditioning from our new IDS-based modules for TextRenderNet
         try:
-            # Use the new tokenized batch processing method
-            text_embeds = self.models['ids_text_embedder'].forward_tokenized_batch(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask'],
-                token_type_ids=batch['token_type_ids'],
-                text_pos=batch['text_pos']
+            # Re-assemble the text information list in the format expected by the embedder
+            batch_texts = []
+            for i in range(len(batch['text_content'])):
+                batch_texts.append([{
+                    'content': batch['text_content'][i],
+                    'pos': batch['text_pos'][i].tolist() # Ensure pos is a list
+                }])
+
+            text_embeds = self.models['ids_text_embedder'].get_text_embeds_batch(
+                batch_texts=batch_texts
             )  # (batch_size, 112, 128) - token-level features
             
-            # Transform through adapter to get conditioning features
-            text_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
-            
+            # Transform through adapter to get conditioning features for TextRenderNet
+            text_render_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
+                
         except Exception as e:
             logger.error(f"Error in text processing: {e}")
-            # Fallback to zero conditioning
-            text_features = torch.zeros(
-                latents.shape[0], 112, 4096, 
-                device=self.device, dtype=latents.dtype
-            )
         
-        # 5. Get ControlNet guidance from TextRenderNet
+        # 4.bis. Get prompt conditioning for SceneGenNet and the main Transformer
         try:
-            with torch.no_grad():
-                # Prepare conditioning images (masked images)
-                conditioning_images = batch['conditioning_pixel_values']
-                
-                # Get ControlNet residuals
-                controlnet_output = self.models['text_render_net'](
-                    hidden_states=noisy_latents,
-                    timestep=timesteps,
-                    encoder_hidden_states=text_features,
-                    controlnet_cond=conditioning_images,
-                    return_dict=False
-                )
+            # The dataset provides a single 'prompt' list. We use it for all three encoders,
+            # which is the standard behavior when prompt_2 and prompt_3 are not provided.
+            prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt=batch['prompt'])
+        except Exception as e:
+            logger.error(f"Error in prompt encoding: {e}")
+            return None
+
+        # 5. Get ControlNet guidance from both ControlNets
+        try:
+            # Prepare pooled projections (zeros) to satisfy SD3 embedding API
+            # Note: In training, we often use zeros for pooled projections for simplicity
+            pooled_projection_dim = self.models['transformer'].config.pooled_projection_dim
+            pooled_zeros = torch.zeros(
+                noisy_latents.shape[0], pooled_projection_dim,
+                device=noisy_latents.device, dtype=noisy_latents.dtype
+            )
+
+            # Get SceneGenNet residuals
+            scene_control_output = self.models['scene_gen_net'](
+                hidden_states=noisy_latents,
+                timestep=timesteps,
+                encoder_hidden_states=prompt_embeds,
+                pooled_projections=pooled_zeros,
+                controlnet_cond=batch['scene_conditioning_pixel_values'],
+                return_dict=False
+            )
+            scene_block_samples = scene_control_output[0]
+
+            # Get TextRenderNet residuals
+            text_control_output = self.models['text_render_net'](
+                hidden_states=noisy_latents,  
+                timestep=timesteps,
+                encoder_hidden_states=text_render_features,
+                pooled_projections=pooled_zeros,
+                controlnet_cond=batch['text_render_conditioning_pixel_values'],
+                return_dict=False
+            )
+            text_block_samples = text_control_output[0]
+
+            # Combine residuals from both controlnets
+            # As per PosterMaker pipeline, we add the residuals together
+            control_block_samples = []
+            for scene_sample, text_sample in zip(scene_block_samples, text_block_samples):
+                control_block_samples.append(scene_sample + text_sample)
+            control_block_samples = tuple(control_block_samples)
                 
         except Exception as e:
             logger.error(f"Error in ControlNet processing: {e}")
             # Fallback to no control guidance
-            down_block_res_samples = None
-            mid_block_res_sample = None
+            control_block_samples = None
         
         # 6. Predict noise with the main SD3 Transformer
         try:
             model_pred = self.models['transformer'](
                 hidden_states=noisy_latents,
                 timestep=timesteps,
-                encoder_hidden_states=text_features,
-                pooled_projections=None,  # Not used in this stage
-                down_block_additional_residuals=down_block_res_samples,
-                mid_block_additional_residual=mid_block_res_sample,
+                encoder_hidden_states=prompt_embeds,
+                pooled_projections=pooled_prompt_embeds,
+                block_controlnet_hidden_states=control_block_samples,  # Inject COMBINED ControlNet residuals
                 return_dict=False
             )[0]
             
@@ -424,6 +603,7 @@ class Trainer:
         self.models['vae'].eval()
         self.models['transformer'].eval()
         self.models['text_render_net'].eval()
+        self.models['scene_gen_net'].eval()
         self.models['ids_text_embedder'].eval()
         self.models['adapter'].eval()
 
@@ -445,19 +625,35 @@ class Trainer:
                     val_batch[key] = value[:batch_size]
 
             # --- Prepare Text Conditioning ---
-            # Use the tokenized batch processing method
-            text_embeds = self.models['ids_text_embedder'].forward_tokenized_batch(
-                input_ids=val_batch['input_ids'],
-                attention_mask=val_batch['attention_mask'],
-                token_type_ids=val_batch['token_type_ids'],
-                text_pos=val_batch['text_pos']
-            )  # (batch_size, 112, 128) - token-level features
+            # 修复int64溢出：统一text_pos的dtype为float32
+            if 'text_pos' in val_batch:
+                if isinstance(val_batch['text_pos'], torch.Tensor):
+                    val_batch['text_pos'] = val_batch['text_pos'].to(device=self.device, dtype=torch.float32)
+                else:
+                    val_batch['text_pos'] = torch.tensor(val_batch['text_pos'], device=self.device, dtype=torch.float32)
+            
+            # Re-assemble the text info list for the validation batch
+            val_batch_texts = []
+            for i in range(batch_size):
+                val_batch_texts.append([{
+                    'content': val_batch['text_content'][i],
+                    'pos': val_batch['text_pos'][i].tolist()
+                }])
+            
+            text_embeds = self.models['ids_text_embedder'].get_text_embeds_batch(
+                batch_texts=val_batch_texts
+            )
             
             # Transform through adapter to get conditioning features
             text_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
+
+            # --- Prepare Prompt Conditioning ---
+            # Use the same prompt for all encoders, mirroring the training setup
+            prompt_embeds, pooled_prompt_embeds = self._encode_prompt(val_batch['prompt'])
             
-            # Prepare ControlNet conditioning
-            controlnet_cond = val_batch['conditioning_pixel_values']  # (batch_size, 3, H, W)
+            # Prepare ControlNet conditioning images
+            scene_cond = val_batch['scene_conditioning_pixel_values']
+            text_cond = val_batch['text_render_conditioning_pixel_values']
 
             # --- Initialize Random Noise Latents ---
             # Get the correct latent shape by encoding a sample image
@@ -482,23 +678,48 @@ class Trainer:
                 timestep = t.expand(latents.shape[0])
                 
                 try:
-                    # Get ControlNet guidance
-                    down_block_res_samples, mid_block_res_sample = self.models['text_render_net'](
-                        sample=latents,
+                    # Prepare pooled projections (zeros)
+                    pooled_projection_dim = self.models['transformer'].config.pooled_projection_dim
+                    pooled_zeros = torch.zeros(
+                        latents.shape[0], pooled_projection_dim,
+                        device=latents.device, dtype=latents.dtype
+                    )
+
+                    # Get SceneGenNet guidance
+                    scene_control_output = self.models['scene_gen_net'](
+                        hidden_states=latents,
                         timestep=timestep,
-                        encoder_hidden_states=text_features,
-                        controlnet_cond=controlnet_cond,
+                        encoder_hidden_states=prompt_embeds,
+                        pooled_projections=pooled_zeros,
+                        controlnet_cond=scene_cond,
                         return_dict=False
                     )
+                    scene_block_samples = scene_control_output[0]
+
+                    # Get TextRenderNet guidance
+                    text_control_output = self.models['text_render_net'](
+                        hidden_states=latents,
+                        timestep=timestep,
+                        encoder_hidden_states=text_features,
+                        pooled_projections=pooled_zeros,
+                        controlnet_cond=text_cond,
+                        return_dict=False
+                    )
+                    text_block_samples = text_control_output[0]
                     
+                    # Combine residuals
+                    control_block_samples = []
+                    for scene_sample, text_sample in zip(scene_block_samples, text_block_samples):
+                        control_block_samples.append(scene_sample + text_sample)
+                    control_block_samples = tuple(control_block_samples)
+
                     # Predict noise with main transformer
                     noise_pred = self.models['transformer'](
                         hidden_states=latents,
                         timestep=timestep,
-                        encoder_hidden_states=text_features,
-                        pooled_projections=None,
-                        down_block_additional_residuals=down_block_res_samples,
-                        mid_block_additional_residual=mid_block_res_sample,
+                        encoder_hidden_states=prompt_embeds,
+                        pooled_projections=pooled_prompt_embeds,
+                        block_controlnet_hidden_states=control_block_samples,  # Inject combined residuals
                         return_dict=False
                     )[0]
                     
@@ -532,9 +753,13 @@ class Trainer:
             save_image(images, save_path, nrow=2, normalize=False)
             
             # Also save the conditioning images for comparison
-            conditioning_save_path = os.path.join(output_dir, f"conditioning_epoch_{epoch}_step_{step}.png")
-            conditioning_images = (controlnet_cond / 2 + 0.5).clamp(0, 1)  # Denormalize
-            save_image(conditioning_images, conditioning_save_path, nrow=2, normalize=False)
+            scene_cond_save_path = os.path.join(output_dir, f"scene_cond_epoch_{epoch}_step_{step}.png")
+            scene_cond_images = (scene_cond / 2 + 0.5).clamp(0, 1)  # Denormalize
+            save_image(scene_cond_images, scene_cond_save_path, nrow=2, normalize=False)
+
+            text_cond_save_path = os.path.join(output_dir, f"text_cond_epoch_{epoch}_step_{step}.png")
+            text_cond_images = (text_cond / 2 + 0.5).clamp(0, 1)  # Denormalize
+            save_image(text_cond_images, text_cond_save_path, nrow=2, normalize=False)
             
             # Save original images for reference
             original_save_path = os.path.join(output_dir, f"original_epoch_{epoch}_step_{step}.png")
@@ -543,7 +768,8 @@ class Trainer:
             
             print(f"✓ Validation images saved:")
             print(f"  Generated: {save_path}")
-            print(f"  Conditioning: {conditioning_save_path}")
+            print(f"  Scene Conditioning: {scene_cond_save_path}")
+            print(f"  Text Conditioning: {text_cond_save_path}")
             print(f"  Original: {original_save_path}")
 
         except Exception as e:

@@ -6,23 +6,32 @@ initializing new modules, and applying weight freezing for Stage 1 training.
 
 import torch
 import os
+import sys
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from diffusers import AutoencoderKL, SD3Transformer2DModel
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-# Import our custom model classes
-from .models.controlnet_sd3 import SD3ControlNetModel
+# Import our custom model classes  
+# 使用PosterMaker的ControlNet实现，解决"骨架不匹配"问题
 from .models.adapter_models import LinearAdapterWithLayerNorm
 from .models.ids_text_embedder import IDSTextEmbedder
+
+# Always import ControlNet from PosterMaker to match checkpoints exactly
+def _import_pm_controlnet(poster_maker_dir: Path):
+    if str(poster_maker_dir) not in sys.path:
+        sys.path.insert(0, str(poster_maker_dir))
+    from models.controlnet_sd3 import SD3ControlNetModel as PM_SD3ControlNetModel
+    return PM_SD3ControlNetModel
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> Dict[str, torch.nn.Module]:
+def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> Tuple[Dict[str, torch.nn.Module], Dict[str, Any]]:
     """
     Load all necessary models for Stage 1 training, initialize new components,
     load pre-trained weights, and apply the correct weight freezing.
@@ -32,7 +41,9 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
         device (torch.device): The device to move models to (e.g., 'cuda')
 
     Returns:
-        Dict[str, torch.nn.Module]: A dictionary containing all model components
+        Tuple[Dict[str, torch.nn.Module], Dict[str, Any]]: A tuple containing:
+            - A dictionary of all model components
+            - A dictionary of all tokenizer components
     """
     logger.info("Loading all models for Stage 1 training...")
     
@@ -59,39 +70,76 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
     transformer = SD3Transformer2DModel.from_pretrained(str(transformer_path))
     logger.info(f"Loaded SD3 Transformer from {transformer_path}")
     
-    # Note: Text encoders are not needed for Stage 1 training, saving VRAM
+    # Load Text Encoders for SceneGenNet
+    logger.info("Loading SD3 Text Encoders for prompt processing...")
+    text_encoder = CLIPTextModelWithProjection.from_pretrained(str(sd3_path), subfolder="text_encoder")
+    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(str(sd3_path), subfolder="text_encoder_2")
+    text_encoder_3 = T5EncoderModel.from_pretrained(str(sd3_path), subfolder="text_encoder_3")
+    
+    tokenizer = CLIPTokenizer.from_pretrained(str(sd3_path), subfolder="tokenizer")
+    tokenizer_2 = CLIPTokenizer.from_pretrained(str(sd3_path), subfolder="tokenizer_2")
+    tokenizer_3 = T5TokenizerFast.from_pretrained(str(sd3_path), subfolder="tokenizer_3")
+
+    logger.info("Loaded all three text encoders and tokenizers.")
     
     # --- 2. Load Pre-trained ControlNets ---
-    logger.info("Loading pre-trained ControlNets...")
-    
-    # Load TextRenderNet
-    text_render_net_path = poster_maker_dir / config['original_textrender_net_path']
-    if not text_render_net_path.exists():
-        raise FileNotFoundError(f"TextRenderNet weights not found: {text_render_net_path}")
-    
-    # Create TextRenderNet from transformer config
-    text_render_net = SD3ControlNetModel.from_transformer(
-        transformer, 
-        num_layers=transformer.config.num_layers,
-        # additional_in_channel=1,  # For inpainting mask
-        load_weights_from_transformer=True
-    )
-    
-    # Load TextRenderNet weights (includes both controlnet and adapter weights)
-    textrender_net_state_dict = torch.load(text_render_net_path, map_location='cpu')
-    
-    # Extract TextRenderNet weights based on state dict structure
-    if 'controlnet_text' in textrender_net_state_dict:
-        text_render_net.load_state_dict(textrender_net_state_dict['controlnet_text'], strict=False)
-        logger.info(f"✓ Loaded TextRenderNet from 'controlnet_text' key in {text_render_net_path}")
+    logger.info("Loading ControlNets...")
+    PM_SD3ControlNetModel = _import_pm_controlnet(poster_maker_dir)
+
+    # 5.1 Load SceneGenNet (controlnet_inpaint)
+    scene_gen_net_path_str = config.get('scene_gen_net_path')
+    if scene_gen_net_path_str:
+        scene_gen_net_path = poster_maker_dir / scene_gen_net_path_str
     else:
-        # Fallback: assume the entire state dict is for the controlnet
-        text_render_net.load_state_dict(textrender_net_state_dict, strict=False)
-        logger.info(f"✓ Loaded TextRenderNet (direct mode) from {text_render_net_path}")
-        logger.warning("Using fallback loading mode - check if this is expected")
-    
-    # --- 3. Initialize Our New/Trainable Modules ---
-    logger.info("Initializing new trainable modules...")
+        scene_gen_net_path = None
+
+    if scene_gen_net_path and scene_gen_net_path.exists():
+        logger.info(f"Loading pre-trained SceneGenNet from state_dict: {scene_gen_net_path}")
+        scene_gen_net = PM_SD3ControlNetModel.from_transformer(
+            transformer,
+            num_layers=23,
+            additional_in_channel=1,
+            load_weights_from_transformer=False,
+        )
+        state_dict = torch.load(scene_gen_net_path, map_location="cpu")
+        scene_gen_net.load_state_dict(state_dict, strict=False)
+    else:
+        logger.warning(f"SceneGenNet weights not found at {scene_gen_net_path}. It will be initialized from the main transformer weights.")
+        scene_gen_net = PM_SD3ControlNetModel.from_transformer(
+            transformer,
+            num_layers=23,
+            additional_in_channel=1,
+            use_inflight_zero_flushing=False,
+        )
+
+    # 5.2 Load original TextRenderNet (controlnet_text) for comparison or other purposes
+    text_render_net_path_str = config.get('original_textrender_net_path')
+    if text_render_net_path_str:
+        text_render_net_path = poster_maker_dir / text_render_net_path_str
+    else:
+        text_render_net_path = None
+
+    if text_render_net_path and text_render_net_path.exists():
+        logger.info(f"Loading pre-trained TextRenderNet from state_dict: {text_render_net_path}")
+        text_render_net = PM_SD3ControlNetModel.from_transformer(
+            transformer,
+            num_layers=12,
+            additional_in_channel=0,
+            load_weights_from_transformer=False,
+        )
+        state_dict = torch.load(text_render_net_path, map_location="cpu")
+        text_render_net.load_state_dict(state_dict, strict=False)
+    else:
+        logger.warning(f"Original TextRenderNet weights not found at {text_render_net_path}. It will be initialized from the main transformer weights.")
+        text_render_net = PM_SD3ControlNetModel.from_transformer(
+            transformer,
+            num_layers=12,
+            additional_in_channel=0,
+            use_inflight_zero_flushing=False,
+        )
+
+    # --- 6. Initialize New Components for Training ---
+    logger.info("Initializing new components for training...")
     
     # Initialize the new IDSTextEmbedder
     ids_database_path = poster_maker_dir / config['ids_database_path']
@@ -130,7 +178,7 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
     logger.info(f"Initialized IDSTextEmbedder with vocab size: {ids_text_embedder.tokenizer.vocab_size}")
     
     # Initialize the Adapter
-    # The adapter transforms IDS embedder token features (128D) to ControlNet input dimension
+    # The adapter transforms IDS embedder token features (128D) to SD3 joint attention dimension
     hidden_dim = 128  # Token feature dimension from IDSTextEmbedder (64 + 32 + 32)
     projection_dim = transformer.config.joint_attention_dim  # SD3 expects 4096D features
     
@@ -139,17 +187,12 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
         projection_dim=projection_dim
     )
     
-    # Load pre-trained adapter weights from the TextRenderNet state dict
-    if 'adapter' in textrender_net_state_dict:
-        try:
-            adapter.load_state_dict(textrender_net_state_dict['adapter'], strict=False)
-            logger.info("✓ Loaded pre-trained adapter weights from TextRenderNet state dict")
-        except Exception as e:
-            logger.warning(f"Could not load adapter weights from TextRenderNet: {e}. Using Xavier initialization.")
-            adapter.apply(lambda m: torch.nn.init.xavier_uniform_(m.weight) if hasattr(m, 'weight') else None)
-    else:
-        logger.warning("Adapter weights not found in TextRenderNet state dict, using Xavier initialization")
-        adapter.apply(lambda m: torch.nn.init.xavier_uniform_(m.weight) if hasattr(m, 'weight') else None)
+    # Safe initialization: only initialize Linear layers to avoid shape errors
+    for m in adapter.modules():
+        if isinstance(m, torch.nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
     
     logger.info(f"Initialized Adapter: {hidden_dim}D -> {projection_dim}D")
     
@@ -160,30 +203,51 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
     vae.requires_grad_(False)
     transformer.requires_grad_(False)
     text_render_net.requires_grad_(False)
+    scene_gen_net.requires_grad_(False)
+    text_encoder.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
+    text_encoder_3.requires_grad_(False)
     
     # Enable training for our target modules
     ids_text_embedder.requires_grad_(True)
     adapter.requires_grad_(True)
     
     logger.info("Weight freezing applied:")
-    logger.info("  Frozen: VAE, SD3 Transformer, TextRenderNet")
+    logger.info("  Frozen: VAE, SD3 Transformer, TextRenderNet, SceneGenNet, Text Encoders")
     logger.info("  Trainable: IDSTextEmbedder, Adapter")
     
     # --- 5. Move to Device and Set Training Modes ---
     logger.info(f"Moving models to device: {device}")
     
+    # Move large frozen models to GPU in FP16 to save VRAM
     models = {
-        "vae": vae.to(device),
-        "transformer": transformer.to(device), 
-        "text_render_net": text_render_net.to(device),
-        "ids_text_embedder": ids_text_embedder.to(device),
-        "adapter": adapter.to(device)
+        "vae": vae.to(device=device, dtype=torch.float16),
+        "transformer": transformer.to(device=device, dtype=torch.float16), 
+        "text_render_net": text_render_net.to(device=device, dtype=torch.float16),
+        "scene_gen_net": scene_gen_net.to(device=device, dtype=torch.float16),
+        # Keep trainable modules in FP32 on GPU
+        "ids_text_embedder": ids_text_embedder.to(device=device),
+        "adapter": adapter.to(device=device),
+        # Offload text encoders to CPU to reduce GPU memory footprint
+        "text_encoder": text_encoder.to("cpu"),
+        "text_encoder_2": text_encoder_2.to("cpu"),
+        "text_encoder_3": text_encoder_3.to("cpu"),
+    }
+
+    tokenizers = {
+        "tokenizer": tokenizer,
+        "tokenizer_2": tokenizer_2,
+        "tokenizer_3": tokenizer_3,
     }
     
     # Set appropriate training modes
     models['vae'].eval()  # Always in eval mode
     models['transformer'].eval()  # Frozen, eval mode
     models['text_render_net'].eval()  # Frozen, eval mode
+    models['scene_gen_net'].eval()  # Frozen, eval mode
+    models['text_encoder'].eval()
+    models['text_encoder_2'].eval()
+    models['text_encoder_3'].eval()
     models['ids_text_embedder'].train()  # Trainable, train mode
     models['adapter'].train()  # Trainable, train mode
     
@@ -204,7 +268,7 @@ def load_all_models_for_stage1(config: Dict[str, Any], device: torch.device) -> 
     
     logger.info("All models loaded successfully for Stage 1 training!")
     
-    return models
+    return models, tokenizers
 
 
 def save_model_checkpoint(models: Dict[str, torch.nn.Module], 
@@ -319,7 +383,7 @@ def verify_model_setup(models: Dict[str, torch.nn.Module]) -> bool:
         bool: True if setup is correct
     """
     # Check that frozen models are in eval mode and have no gradients
-    frozen_models = ['vae', 'transformer', 'text_render_net']
+    frozen_models = ['vae', 'transformer', 'text_render_net', 'scene_gen_net', 'text_encoder', 'text_encoder_2', 'text_encoder_3']
     trainable_models = ['ids_text_embedder', 'adapter']
     
     for name in frozen_models:

@@ -11,6 +11,10 @@ Modified for configurable paths in training pipeline
 import torch
 import torch.nn as nn
 from typing import List, Dict, Any, Optional
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 from ..utils.ids_tokenizer import IDSTokenizer
 from ..utils.text_utils import normalize_coordinates, pos2coords, get_positional_encoding
 
@@ -227,7 +231,7 @@ class IDSTextEmbedder(nn.Module):
         self.tokenizer = IDSTokenizer(
             ids_database_path=ids_database_path,
             vocab_file=vocab_file,
-            build_vocab=(vocab_file is None)
+            preserve_rare_chars=True
         )
         self.ids_embedding = IDSEmbedding(
             vocab_size=self.tokenizer.vocab_size,
@@ -280,7 +284,8 @@ class IDSTextEmbedder(nn.Module):
             text_content, 
             max_length=max_length,
             add_special_tokens=True,
-            use_recursive=False  # Use simple IDS for initial training
+            use_recursive=False,
+            enhance_rare_chars=False,
         )
         
         return {
@@ -502,10 +507,17 @@ class IDSTextEmbedder(nn.Module):
                 char_pos_encoding  # (16, 32)
             ], dim=-1)  # (16, 96)
             
-            # Add text-level positional encoding
-            coords = pos2coords(text_pos[batch_idx].cpu().numpy())  # Convert to xywh
-            coords_norm = normalize_coordinates(coords, self.input_size[1], self.input_size[0])
-            text_coords_embed = self.fourier_embedder(torch.tensor(coords_norm, device=device))  # (32,)
+            # Add text-level positional encoding with overflow protection
+            try:
+                # Clamp values to prevent overflow and convert safely
+                text_pos_clamped = torch.clamp(text_pos[batch_idx], min=-1e6, max=1e6)
+                coords = pos2coords(text_pos_clamped.cpu().numpy().astype(np.float32))  # Convert to xywh
+                coords_norm = normalize_coordinates(coords, self.input_size[1], self.input_size[0])
+                text_coords_embed = self.fourier_embedder(torch.tensor(coords_norm, device=device, dtype=torch.float32))  # (32,)
+            except (OverflowError, ValueError) as e:
+                # Fallback to zero coordinates if conversion fails
+                logger.warning(f"Position encoding overflow for batch {batch_idx}, using zero coordinates: {e}")
+                text_coords_embed = torch.zeros(32, device=device, dtype=torch.float32)
             text_coords_embed = text_coords_embed.unsqueeze(0).repeat(self.char_padding_to_len, 1)  # (16, 32)
             
             # Final features for this text

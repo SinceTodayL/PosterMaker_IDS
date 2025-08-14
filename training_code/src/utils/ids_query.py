@@ -39,8 +39,7 @@ class IDSQuery:
         # Statistics for monitoring
         self.stats = {
             'total_chars_loaded': 0,
-            'total_ids_sequences': 0,
-            'avg_sequences_per_char': 0.0
+            'total_ids_sequences': 0
         }
         
         self._load_ids_data()
@@ -109,14 +108,10 @@ class IDSQuery:
             # Update statistics
             self.stats['total_chars_loaded'] = chars_processed
             self.stats['total_ids_sequences'] = sequences_processed
-            self.stats['avg_sequences_per_char'] = (
-                sequences_processed / chars_processed if chars_processed > 0 else 0.0
-            )
             
             logger.info(f"Successfully loaded IDS data:")
             logger.info(f"  Characters: {chars_processed}")
             logger.info(f"  IDS sequences: {sequences_processed}")
-            logger.info(f"  Avg sequences per char: {self.stats['avg_sequences_per_char']:.2f}")
 
         except Exception as e:
             error_msg = f"Error loading IDS data from {self.ids_database_path}: {e}"
@@ -147,7 +142,7 @@ class IDSQuery:
         
         return False
     
-    def query(self, char: str, recursive: bool = True) -> Optional[Any]:
+    def query(self, char: str, recursive: bool = False) -> Optional[Any]:
         """
         Query IDS representation for a character
         
@@ -184,7 +179,7 @@ class IDSQuery:
         """
         return self.char_to_ids.get(char)
     
-    def _query_recursive(self, char: str, depth: int = 0, max_depth: int = 10) -> Dict[str, Any]:
+    def _query_recursive(self, char: str, depth: int = 0, max_depth: int = 5) -> Dict[str, Any]:
         """
         Recursive decomposition of character structure
         
@@ -197,7 +192,7 @@ class IDSQuery:
             Dictionary containing decomposition structure
         """
         if depth > max_depth:
-            logger.warning(f"Maximum recursion depth reached for character '{char}'")
+            logger.info(f"Maximum recursion depth reached for character '{char}'")
             return {
                 'char': char,
                 'ids': None,

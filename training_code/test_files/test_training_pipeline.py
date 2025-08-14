@@ -96,7 +96,8 @@ def create_dummy_dataloader(tokenizer, config, batch_size=2, num_samples=4):
                 "测试文本", 
                 max_length=self.max_seq_length,
                 add_special_tokens=True,
-                use_recursive=True
+                use_recursive=False,  # Use simple decomposition for training
+                enhance_rare_chars=False
             )
             
             return {
@@ -143,22 +144,33 @@ def test_complete_training_integration(config, device, temp_dir):
         # Load models
         models = load_all_models_for_stage1(config, device)
         
-        # Create tokenizer
-        poster_maker_dir = Path(config['poster_maker_dir'])
-        ids_database_path = poster_maker_dir / config['ids_database_path']
-        
-        ids_query_instance = IDSQuery(ids_file_path=str(ids_database_path))
+        # Create tokenizer with updated interface
+        # Get paths based on updated configuration
+        if config['ids_database_path'].startswith('./'):
+            # IDS database path is relative to training_code
+            ids_database_path = Path(config['ids_database_path'])
+        else:
+            # IDS database path is relative to poster_maker_dir (legacy support)
+            poster_maker_dir = Path(config['poster_maker_dir'])
+            ids_database_path = poster_maker_dir / config['ids_database_path']
         
         vocab_file = None
         if 'ids_vocab_path' in config:
-            vocab_path = poster_maker_dir / config['ids_vocab_path']
+            if config['ids_vocab_path'].startswith('./'):
+                # Vocabulary path is relative to training_code
+                vocab_path = Path(config['ids_vocab_path'])
+            else:
+                # Vocabulary path is relative to poster_maker_dir (legacy support)
+                poster_maker_dir = Path(config['poster_maker_dir'])
+                vocab_path = poster_maker_dir / config['ids_vocab_path']
+                
             if vocab_path.exists():
                 vocab_file = str(vocab_path)
         
         tokenizer = IDSTokenizer(
-            ids_query_instance=ids_query_instance,
+            ids_database_path=str(ids_database_path),
             vocab_file=vocab_file,
-            build_vocab=(vocab_file is None)
+            preserve_rare_chars=True
         )
         
         # Create dummy dataloaders
@@ -261,21 +273,32 @@ def test_training_pipeline_components(config, device):
         logger.info("✓ All required models loaded")
         
         # Test 3: Tokenizer initialization
-        poster_maker_dir = Path(config['poster_maker_dir'])
-        ids_database_path = poster_maker_dir / config['ids_database_path']
-        
-        ids_query_instance = IDSQuery(ids_file_path=str(ids_database_path))
+        # Get paths based on updated configuration
+        if config['ids_database_path'].startswith('./'):
+            # IDS database path is relative to training_code
+            ids_database_path = Path(config['ids_database_path'])
+        else:
+            # IDS database path is relative to poster_maker_dir (legacy support)
+            poster_maker_dir = Path(config['poster_maker_dir'])
+            ids_database_path = poster_maker_dir / config['ids_database_path']
         
         vocab_file = None
         if 'ids_vocab_path' in config:
-            vocab_path = poster_maker_dir / config['ids_vocab_path']
+            if config['ids_vocab_path'].startswith('./'):
+                # Vocabulary path is relative to training_code
+                vocab_path = Path(config['ids_vocab_path'])
+            else:
+                # Vocabulary path is relative to poster_maker_dir (legacy support)
+                poster_maker_dir = Path(config['poster_maker_dir'])
+                vocab_path = poster_maker_dir / config['ids_vocab_path']
+                
             if vocab_path.exists():
                 vocab_file = str(vocab_path)
         
         tokenizer = IDSTokenizer(
-            ids_query_instance=ids_query_instance,
+            ids_database_path=str(ids_database_path),
             vocab_file=vocab_file,
-            build_vocab=(vocab_file is None)
+            preserve_rare_chars=True
         )
         
         assert tokenizer.vocab_size > 0, "Tokenizer must have non-zero vocabulary"
