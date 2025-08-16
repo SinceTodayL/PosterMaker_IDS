@@ -1,8 +1,5 @@
 """
 IDS Tokenizer for converting IDS sequences to token arrays
-Optimized for LoRA training with enhanced rare character support
-Modified for configurable paths in training pipeline
-Uses standalone vocabulary builder for better modularity
 """
 
 import json
@@ -26,7 +23,7 @@ class IDSTokenizer:
     """
     
     def __init__(self, ids_database_path: str, vocab_file: Optional[str] = None, 
-                 preserve_rare_chars: bool = True):
+                 preserve_rare_chars: bool = False):
         """
         Initialize IDS tokenizer with automatic vocabulary management
         
@@ -62,7 +59,6 @@ class IDSTokenizer:
     def _initialize_vocabulary(self):
         """
         Initialize vocabulary by loading existing file or building new one
-        Uses standalone vocabulary builder for better modularity
         """
         if self.vocab_file and Path(self.vocab_file).exists():
             try:
@@ -138,7 +134,7 @@ class IDSTokenizer:
                    prefer_complex_decomposition: bool = False) -> List[int]:
         """
         Encode a single character to IDS token sequence
-        Default behavior uses simple decomposition for training efficiency
+        Default behavior uses simple decomposition
         
         Args:
             char: Chinese character to encode
@@ -344,136 +340,3 @@ class IDSTokenizer:
                     tokens.append('<UNK>')
                 
         return ''.join(tokens)
-    
-    def get_vocab_info(self) -> Dict:
-        """
-        Get comprehensive vocabulary statistics with rare character analysis
-        
-        Returns:
-            Dictionary containing vocabulary statistics and metadata
-        """
-        idc_count = sum(1 for token in self.token_to_id.keys() if token in self.idc_chars)
-        component_count = self.vocab_size - len(self.special_tokens) - idc_count
-        
-        return {
-            'total_vocab_size': self.vocab_size,
-            'special_tokens': len(self.special_tokens),
-            'idc_chars': idc_count,
-            'components': component_count,
-            'special_token_names': list(self.special_tokens.keys()),
-            'idc_chars_list': sorted(list(self.idc_chars)),
-            'preserve_rare_chars': self.preserve_rare_chars,
-            'rare_char_stats': self.rare_char_stats,
-            'vocab_coverage': self._calculate_coverage(),
-            'vocab_file': self.vocab_file
-        }
-    
-    def _calculate_coverage(self) -> Dict:
-        """Calculate vocabulary coverage statistics"""
-        total_chars = len(self.ids_query.char_to_ids)
-        covered_chars = sum(1 for char in self.ids_query.char_to_ids.keys() 
-                          if char in self.token_to_id)
-        
-        return {
-            'total_chars_in_ids_db': total_chars,
-            'covered_chars': covered_chars,
-            'coverage_ratio': covered_chars / total_chars if total_chars > 0 else 0.0,
-            'rare_char_priority': self.preserve_rare_chars
-        }
-    
-    def analyze_rare_characters(self, text: str) -> Dict:
-        """
-        Analyze rare character coverage and complexity in given text
-        
-        Args:
-            text: Text to analyze
-            
-        Returns:
-            Dictionary with rare character analysis
-        """
-        chinese_chars = [char for char in text if '\u4e00' <= char <= '\u9fff']
-        
-        if not chinese_chars:
-            return {
-                'total_chars': 0,
-                'rare_chars': [],
-                'complex_chars': [],
-                'ids_complexity_score': 0.0
-            }
-        
-        rare_chars = []
-        complex_chars = []
-        total_complexity = 0
-        
-        for char in chinese_chars:
-            # Check if character has IDS decomposition
-            if char in self.ids_query.char_to_ids:
-                ids_list = self.ids_query.char_to_ids[char]
-                
-                # Consider rare if has multiple decompositions or complex structure
-                if len(ids_list) > 1:
-                    rare_chars.append(char)
-                
-                # Calculate complexity based on IDS length
-                max_complexity = max(len(ids) for ids in ids_list) if ids_list else 1
-                if max_complexity > 5:  # Arbitrarily complex threshold
-                    complex_chars.append(char)
-                
-                total_complexity += max_complexity
-            else:
-                # Not in IDS database - potentially very rare
-                rare_chars.append(char)
-                total_complexity += 1
-        
-        return {
-            'total_chars': len(chinese_chars),
-            'rare_chars': rare_chars,
-            'complex_chars': complex_chars,
-            'rare_char_ratio': len(rare_chars) / len(chinese_chars),
-            'complex_char_ratio': len(complex_chars) / len(chinese_chars),
-            'ids_complexity_score': total_complexity / len(chinese_chars)
-        }
-    
-    def validate_encoding(self, text: str, encoding: Dict) -> bool:
-        """
-        Validate that encoding is correct and consistent
-        
-        Args:
-            text: Original text
-            encoding: Encoding result from encode_text
-            
-        Returns:
-            True if encoding is valid
-        """
-        try:
-            # Check required keys
-            required_keys = ['input_ids', 'attention_mask', 'token_type_ids']
-            if not all(key in encoding for key in required_keys):
-                return False
-                
-            # Check length consistency
-            input_ids = encoding['input_ids']
-            attention_mask = encoding['attention_mask']
-            token_type_ids = encoding['token_type_ids']
-            
-            if not (len(input_ids) == len(attention_mask) == len(token_type_ids)):
-                return False
-                
-            # Check token ID validity
-            for token_id in input_ids:
-                if token_id < 0 or token_id >= self.vocab_size:
-                    return False
-                    
-            # Check attention mask values
-            if not all(mask in [0, 1] for mask in attention_mask):
-                return False
-                
-            # Check token type values
-            if not all(ttype in [0, 1] for ttype in token_type_ids):
-                return False
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error validating encoding: {e}")
-            return False

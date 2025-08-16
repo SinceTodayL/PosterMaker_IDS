@@ -286,7 +286,7 @@ def build_ids_vocabulary(ids_database_path: str, vocab_file: str,
 
 
 if __name__ == "__main__":
-    # Example usage and testing
+    
     import argparse
     
     parser = argparse.ArgumentParser(description="Build IDS vocabulary from database")

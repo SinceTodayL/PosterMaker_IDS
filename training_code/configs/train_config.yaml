@@ -1,6 +1,6 @@
 # Configuration for the PosterMaker IDS-based training pipeline
 
-# --- Path Settings ---
+# Path Settings
 # Relative path to the original PosterMaker project directory
 poster_maker_dir: "../PosterMaker" 
 # Path to the dataset root (relative to training_code directory)
@@ -10,13 +10,12 @@ output_dir: "./training_output"
 # Directory for training assets (vocabulary, etc.)
 assets_dir: "./assets"
 
-# --- Pretrained Weights Paths (relative to poster_maker_dir) ---
+# Pretrained Weights Paths (relative to poster_maker_dir)
 sd3_model_path: "checkpoints/stable-diffusion-3-medium-diffusers"
 scene_gen_net_path: "checkpoints/ours_weights/scenegen_net-0415.pth"  
 original_textrender_net_path: "checkpoints/ours_weights/textrender_net-0415.pth"
 # Note: adapter weights are included in textrender_net_path, not a separate file
 
-# --- IDS Assets Paths ---
 # IDS database path (relative to training_code directory)
 ids_database_path: "./ids/ids_database.txt"
 # IDS vocabulary file path (relative to training_code directory, auto-generated if missing)
@@ -24,7 +23,7 @@ ids_vocab_path: "./assets/ids_vocab.json"
 # Pre-trained character features (relative to poster_maker_dir)
 char2feat_path: "assets/char2feat_ppocr_neck64_avg.pth"
 
-# --- Training Hyperparameters ---
+# Training Hyperparameters
 stage1:
   learning_rate: 1.0e-4
   batch_size: 1
@@ -45,6 +44,6 @@ stage1:
   adam_beta2: 0.999        # Adam beta2
   adam_epsilon: 1.0e-8     # Adam epsilon
 
-# --- General Settings ---
-project_name: "PosterMaker_IDS_Upgrade"
+# General Settings
+project_name: "PosterMaker_IDS"
 seed: 42

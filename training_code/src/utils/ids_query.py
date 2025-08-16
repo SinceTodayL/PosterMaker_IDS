@@ -1,7 +1,5 @@
 """
 Chinese Character IDS (Ideographic Description Sequences) Query Interface
-Optimized for LoRA training with improved error handling and logging
-Modified for configurable paths in training pipeline
 """
 
 import re
@@ -18,7 +16,6 @@ class IDSQuery:
     """
     Chinese Character IDS Query Interface
     Provides direct query and recursive decomposition methods
-    Optimized for training workflows
     """
     
     def __init__(self, ids_database_path: str):
@@ -56,7 +53,6 @@ class IDSQuery:
             raise FileNotFoundError(error_msg)
         
         try:
-            # The official file is UTF-8
             chars_processed = 0
             sequences_processed = 0
             
@@ -109,9 +105,11 @@ class IDSQuery:
             self.stats['total_chars_loaded'] = chars_processed
             self.stats['total_ids_sequences'] = sequences_processed
             
+            
             logger.info(f"Successfully loaded IDS data:")
             logger.info(f"  Characters: {chars_processed}")
             logger.info(f"  IDS sequences: {sequences_processed}")
+            
 
         except Exception as e:
             error_msg = f"Error loading IDS data from {self.ids_database_path}: {e}"
@@ -192,7 +190,7 @@ class IDSQuery:
             Dictionary containing decomposition structure
         """
         if depth > max_depth:
-            logger.info(f"Maximum recursion depth reached for character '{char}'")
+            # logger.info(f"Maximum recursion depth reached for character '{char}'")
             return {
                 'char': char,
                 'ids': None,

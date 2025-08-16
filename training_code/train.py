@@ -21,7 +21,8 @@ def parse_args():
     """Parses command-line arguments."""
     parser = argparse.ArgumentParser(description="Train PosterMaker Stage 1 with dual ControlNets")
     parser.add_argument(
-        "--config_file", type=str, required=True, help="Path to the training configuration file."
+        "--config_file", type=str, required=True, help="Path to the training configuration file.",
+        default="configs/train_config.yaml"
     )
     parser.add_argument(
         "--resume_from_checkpoint", type=str, default=None, help="Path to a checkpoint to resume training from."

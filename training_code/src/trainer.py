@@ -277,12 +277,16 @@ class Trainer:
             
             for step, batch in enumerate(self.train_dataloader):
                 with torch.cuda.amp.autocast(enabled=self.config['stage1']['use_amp']):
+                    logger.info(f"Caculate loss...")
                     loss = self._train_step(batch)
-                    
-                    # 跳过返回None的batch（数据处理失败的情况）
+                    logger.info(f"Loss: {loss}")
+
+                    '''
+                    # 跳过返回None的batch
                     if loss is None:
                         logger.warning(f"Skipping batch {step} due to processing error")
                         continue
+                    '''
                     loss = loss / self.config['stage1']['gradient_accumulation_steps']
 
                 # Backward pass
@@ -299,6 +303,9 @@ class Trainer:
                 
                 if self.global_step % 10 == 0:  # Log progress
                     print(f"Step {self.global_step}, Loss: {loss.item() * self.config['stage1']['gradient_accumulation_steps']:.4f}")
+
+                # 保存训练图像 (注释掉)
+                if self.global_step % 2 == 0: os.makedirs('./training_output/training_images', exist_ok=True); save_image((batch['pixel_values'] / 2 + 0.5).clamp(0, 1), f'./training_output/training_images/step_{self.global_step}.png')
 
                 # Validation and Checkpointing
                 if self.global_step % self.config['stage1']['validation_steps'] == 0:
@@ -388,6 +395,7 @@ class Trainer:
         
         # Also move prompt if it's a list of strings
         if "prompt" in batch and isinstance(batch["prompt"], list):
+            
             # The prompt itself is not a tensor, it will be processed by the tokenizer
             pass
 
@@ -402,7 +410,7 @@ class Trainer:
         except Exception as _:
             # Safe guard: if clamping fails due to dtype or missing attributes, continue
             pass
-        
+        logger.info("In _train_step(), before _forward_pass...")
         # Forward pass through the complete pipeline
         loss = self._forward_pass(batch)
         
@@ -423,8 +431,12 @@ class Trainer:
         with torch.no_grad():
             # Scale factor for SD3 VAE (typically 0.13025)
             scaling_factor = getattr(self.models['vae'].config, 'scaling_factor', 0.13025)
+            logger.info(f"Scaling factor: {scaling_factor}")
+            logger.info(f"Batch pixel values shape: {batch['pixel_values'].shape}")
             latents = self.models['vae'].encode(batch['pixel_values']).latent_dist.sample()
+            logger.info(f"Latents shape: {latents.shape}")
             latents = latents * scaling_factor
+            logger.info(f"Latents shape after scaling: {latents.shape}")
         
         # 2. Sample noise and timesteps for diffusion process
         noise = torch.randn_like(latents)
@@ -436,26 +448,42 @@ class Trainer:
         
         # 3. Add noise to latents (forward diffusion process)
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+        logger.info(f"Noisy latents shape: {noisy_latents.shape}")
         
         # 4. Get text conditioning from our new IDS-based modules for TextRenderNet
         try:
-            # Re-assemble the text information list in the format expected by the embedder
-            batch_texts = []
-            for i in range(len(batch['text_content'])):
-                batch_texts.append([{
-                    'content': batch['text_content'][i],
-                    'pos': batch['text_pos'][i].tolist() # Ensure pos is a list
-                }])
-
+            # Use all_texts_info which contains ALL texts from each sample
+            batch_texts = batch['all_texts_info']  # List[List[Dict]] format expected by embedder
+            logger.info(f"Processing {len(batch_texts)} samples with multiple texts each")
+            
+            # DEBUG: Print actual text content to verify we're loading all texts
+            for i, sample_texts in enumerate(batch_texts):
+                logger.info(f"Sample {i} has {len(sample_texts)} texts:")
+                for j, text_info in enumerate(sample_texts):
+                    logger.info(f"  Text {j}: '{text_info['content']}' at pos {text_info['pos']}")
+                # Also check the combined content
+                logger.info(f"Sample {i} combined content: '{batch['text_content'][i]}'")
+            
             text_embeds = self.models['ids_text_embedder'].get_text_embeds_batch(
                 batch_texts=batch_texts
             )  # (batch_size, 112, 128) - token-level features
+            logger.info(f"Text embeds shape: {text_embeds.shape}")
             
             # Transform through adapter to get conditioning features for TextRenderNet
             text_render_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
-                
+            logger.info(f"Text render features shape: {text_render_features.shape}")
+
         except Exception as e:
             logger.error(f"Error in text processing: {e}")
+            logger.error(f"Batch all_texts_info format: {type(batch.get('all_texts_info', 'missing'))}")
+            # Create fallback zero features to continue training
+            batch_size = batch['pixel_values'].shape[0]
+            projection_dim = self.models['transformer'].config.joint_attention_dim  # 4096
+            text_render_features = torch.zeros(
+                batch_size, 112, projection_dim,
+                device=self.device, dtype=torch.float32
+            )
+            logger.warning("Using zero text features as fallback")
         
         # 4.bis. Get prompt conditioning for SceneGenNet and the main Transformer
         try:
@@ -476,24 +504,45 @@ class Trainer:
                 device=noisy_latents.device, dtype=noisy_latents.dtype
             )
 
-            # Get SceneGenNet residuals
+            # 5.1 Prepare ControlNet conditioning in latent space
+            with torch.no_grad():
+                # Encode scene conditioning image to latent space
+                scene_cond_latents = self.models['vae'].encode(batch['scene_conditioning_pixel_values']).latent_dist.sample()
+                scene_cond_latents = scene_cond_latents * scaling_factor
+                
+                # For SceneGenNet, we need to add mask channel (using conditioning_mask)
+                # Resize mask to latent space dimensions
+                conditioning_mask_resized = torch.nn.functional.interpolate(
+                    batch['conditioning_mask'], 
+                    size=(scene_cond_latents.shape[2], scene_cond_latents.shape[3]),
+                    mode='nearest'
+                )
+                # Concatenate image latents (16 channels) + mask (1 channel) = 17 channels
+                scene_controlnet_input = torch.cat([scene_cond_latents, conditioning_mask_resized], dim=1)
+                
+                # Encode text conditioning image to latent space (16 channels only)
+                text_cond_latents = self.models['vae'].encode(batch['text_render_conditioning_pixel_values']).latent_dist.sample()
+                text_cond_latents = text_cond_latents * scaling_factor
+                text_controlnet_input = text_cond_latents
+
+            # Get SceneGenNet residuals (expects 17 channels: 16 latent + 1 mask)
             scene_control_output = self.models['scene_gen_net'](
                 hidden_states=noisy_latents,
                 timestep=timesteps,
                 encoder_hidden_states=prompt_embeds,
                 pooled_projections=pooled_zeros,
-                controlnet_cond=batch['scene_conditioning_pixel_values'],
+                controlnet_cond=scene_controlnet_input,
                 return_dict=False
             )
             scene_block_samples = scene_control_output[0]
 
-            # Get TextRenderNet residuals
+            # Get TextRenderNet residuals (expects 16 channels: latent only)
             text_control_output = self.models['text_render_net'](
                 hidden_states=noisy_latents,  
                 timestep=timesteps,
                 encoder_hidden_states=text_render_features,
                 pooled_projections=pooled_zeros,
-                controlnet_cond=batch['text_render_conditioning_pixel_values'],
+                controlnet_cond=text_controlnet_input,
                 return_dict=False
             )
             text_block_samples = text_control_output[0]
@@ -512,10 +561,12 @@ class Trainer:
         
         # 6. Predict noise with the main SD3 Transformer
         try:
+            # CRITICAL FIX: Use our trainable text features instead of frozen prompt embeds
+            # This ensures gradients flow through IDSTextEmbedder and Adapter
             model_pred = self.models['transformer'](
                 hidden_states=noisy_latents,
                 timestep=timesteps,
-                encoder_hidden_states=prompt_embeds,
+                encoder_hidden_states=text_render_features,  # Use trainable features instead of frozen prompt_embeds!
                 pooled_projections=pooled_prompt_embeds,
                 block_controlnet_hidden_states=control_block_samples,  # Inject COMBINED ControlNet residuals
                 return_dict=False
@@ -625,20 +676,14 @@ class Trainer:
                     val_batch[key] = value[:batch_size]
 
             # --- Prepare Text Conditioning ---
-            # 修复int64溢出：统一text_pos的dtype为float32
             if 'text_pos' in val_batch:
                 if isinstance(val_batch['text_pos'], torch.Tensor):
                     val_batch['text_pos'] = val_batch['text_pos'].to(device=self.device, dtype=torch.float32)
                 else:
                     val_batch['text_pos'] = torch.tensor(val_batch['text_pos'], device=self.device, dtype=torch.float32)
             
-            # Re-assemble the text info list for the validation batch
-            val_batch_texts = []
-            for i in range(batch_size):
-                val_batch_texts.append([{
-                    'content': val_batch['text_content'][i],
-                    'pos': val_batch['text_pos'][i].tolist()
-                }])
+            # Use all_texts_info for validation (contains ALL texts from each sample)
+            val_batch_texts = val_batch['all_texts_info']
             
             text_embeds = self.models['ids_text_embedder'].get_text_embeds_batch(
                 batch_texts=val_batch_texts

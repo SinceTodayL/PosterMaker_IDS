@@ -64,27 +64,6 @@ class IDSEmbedding(nn.Module):
         with torch.no_grad():
             self.token_embedding.weight[0].fill_(0)
             
-        # Align with pre-trained char2feat if available
-        if self.char2feat is not None:
-            self._align_with_char2feat()
-            
-    def _align_with_char2feat(self):
-        """Align IDS token embeddings with pre-trained character features"""
-        print("Aligning IDS embeddings with pre-trained character features...")
-        
-        aligned_count = 0
-        total_chars = 0
-        
-        with torch.no_grad():
-            # Get tokenizer for reverse mapping (assuming it's available globally)
-            # This is a bit hacky but necessary for initialization
-            for token_id in range(1, self.vocab_size):  # Skip PAD token
-                # Try to find corresponding character in char2feat
-                # This requires access to id_to_token mapping
-                # We'll implement a more elegant solution in the full training code
-                pass
-                
-        print(f"Aligned {aligned_count}/{total_chars} character embeddings with pre-trained features")
         
     def set_char2feat_alignment(self, tokenizer, alignment_weight: float = 0.5):
         """
@@ -197,11 +176,17 @@ class IDSStructuralAttention(nn.Module):
             x: (batch_size, seq_len, embed_dim)
             attention_mask: (batch_size, seq_len)
         """
-        # Self-attention with residual connection
-        attn_mask = attention_mask.unsqueeze(1).expand(-1, x.size(1), -1)
+        # Self-attention with residual connection  
+        # For MultiheadAttention, attn_mask should have shape (N*num_heads, L, S) where N is batch size
+        # But PyTorch MultiheadAttention expects (L, S) for unbatched or (N, L, S) for batched
+        # Let's use the simpler 2D mask approach
+        attn_mask = attention_mask  # Keep original mask shape (batch_size, seq_len)
+        # Convert 1s to 0s and 0s to -inf for attention masking
+        attn_mask = attn_mask.float()
         attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf'))
+        attn_mask = attn_mask.masked_fill(attn_mask == 1, 0.0)
         
-        attn_out, _ = self.structural_attention(x, x, x, attn_mask=attn_mask)
+        attn_out, _ = self.structural_attention(x, x, x, key_padding_mask=(attention_mask == 0))
         x = self.layer_norm1(x + attn_out)
         
         # Feed-forward with residual connection
@@ -224,7 +209,7 @@ class IDSTextEmbedder(nn.Module):
                  input_size: tuple = (1024, 1024),
                  use_structural_attention: bool = True,
                  char2feat_path: Optional[str] = None,
-                 char2feat_alignment_weight: float = 0.3):
+                 char2feat_alignment_weight: float = 0.5):
         super().__init__()
         
         # IDS tokenizer and embedding with configurable paths
@@ -358,7 +343,7 @@ class IDSTextEmbedder(nn.Module):
         """
         Forward pass of IDS Text Embedder
         Returns features with shape (max_token_num, final_feature_dim)
-        where final_feature_dim = 128 (64 + 32 + 32)
+        final_feature_dim = 128 (64 + 32 + 32)
         """
         device = next(self.parameters()).device
         
