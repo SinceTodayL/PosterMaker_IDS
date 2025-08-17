@@ -304,9 +304,6 @@ class Trainer:
                 if self.global_step % 10 == 0:  # Log progress
                     print(f"Step {self.global_step}, Loss: {loss.item() * self.config['stage1']['gradient_accumulation_steps']:.4f}")
 
-                # 保存训练图像 (注释掉)
-                if self.global_step % 2 == 0: os.makedirs('./training_output/training_images', exist_ok=True); save_image((batch['pixel_values'] / 2 + 0.5).clamp(0, 1), f'./training_output/training_images/step_{self.global_step}.png')
-
                 # Validation and Checkpointing
                 if self.global_step % self.config['stage1']['validation_steps'] == 0:
                     val_loss = self._validate()
@@ -561,14 +558,14 @@ class Trainer:
         
         # 6. Predict noise with the main SD3 Transformer
         try:
-            # CRITICAL FIX: Use our trainable text features instead of frozen prompt embeds
-            # This ensures gradients flow through IDSTextEmbedder and Adapter
+            # Main SD3 uses standard CLIP+T5 prompt encoding
+            # IDS text features influence through TextRenderNet residuals, not direct input
             model_pred = self.models['transformer'](
                 hidden_states=noisy_latents,
                 timestep=timesteps,
-                encoder_hidden_states=text_render_features,  # Use trainable features instead of frozen prompt_embeds!
+                encoder_hidden_states=prompt_embeds,  # Use standard CLIP+T5 prompt embeds
                 pooled_projections=pooled_prompt_embeds,
-                block_controlnet_hidden_states=control_block_samples,  # Inject COMBINED ControlNet residuals
+                block_controlnet_hidden_states=control_block_samples,  # IDS features affect through ControlNet residuals
                 return_dict=False
             )[0]
             
@@ -598,7 +595,34 @@ class Trainer:
             torch.Tensor: Computed loss value
         """
         # Primary denoising loss (MSE between predicted and target noise)
-        denoise_loss = F.mse_loss(
+        # - NEW: Crop tensors to the valid region before calculating loss ---
+        
+        # Get the new_size from the batch's post_process_info
+        # In a batch, all images are resized to the same dimensions,
+        # so we can take the info from the first sample.
+        if 'post_process_info' in batch and batch['post_process_info']:
+            # batch['post_process_info'] is a list of dicts
+            new_h, new_w = batch['post_process_info'][0]['new_size']
+            
+            # The VAE output latents are smaller than the input image.
+            # We need to calculate the corresponding size in the latent space.
+            # Input is 1024x1024, latent is typically H/8 x W/8.
+            latent_h = predicted_noise.shape[2]
+            latent_w = predicted_noise.shape[3]
+            
+            # Assume target_size used in dataset was 1024
+            scale_h = latent_h / 1024
+            scale_w = latent_w / 1024
+            
+            # Calculate the crop dimensions in latent space
+            crop_h = int(new_h * scale_h)
+            crop_w = int(new_w * scale_w)
+            
+            # Crop the tensors
+            predicted_noise = predicted_noise[:, :, :crop_h, :crop_w]
+            target_noise = target_noise[:, :, :crop_h, :crop_w]
+
+        total_loss = F.mse_loss(
             predicted_noise.float(), 
             target_noise.float(), 
             reduction="mean"
@@ -610,8 +634,6 @@ class Trainer:
         # - Adversarial loss for improved realism  
         # - Text-image alignment loss
         # - Region-specific loss weighting based on masks
-        
-        total_loss = denoise_loss
         
         return total_loss
     

@@ -241,54 +241,33 @@ class PosterDatasetStage1(Dataset):
     
     def _create_conditioning_image(self, image: Image.Image, text_positions: List[List[int]]) -> Image.Image:
         """
-        Create conditioning image by masking the text regions.
+        Create a conditioning image by masking text regions on a copy of the original image.
+        This function operates purely on PIL Images.
         
         Args:
             image (Image.Image): Original PIL image.
             text_positions (List[List[int]]): List of text positions [[x1, y1, x2, y2], ...].
             
         Returns:
-            Image.Image: PIL image with text regions masked.
+            Image.Image: A new PIL image with text regions masked.
         """
-        # Apply the same transformation that will be applied to the main image
-        image_tensor = self.image_transforms(image)
-        
-        # Return original transformed image if no text to mask
-        if not text_positions:
-            # Convert back to PIL
-            conditioning_array = ((image_tensor + 1) / 2).permute(1, 2, 0).numpy()
-            conditioning_array = (conditioning_array * 255).astype('uint8')
-            return Image.fromarray(conditioning_array, mode='RGB')
+        # Create a copy to avoid modifying the original image
+        conditioning_image = image.copy()
 
-        # Calculate adjusted positions for the padded/scaled image (top-left alignment)
-        orig_width, orig_height = image.size
-        scale = min(self.target_size / orig_height, self.target_size / orig_width)
-        offset_x, offset_y = 0, 0  # No offset needed for top-left alignment
+        if not text_positions:
+            return conditioning_image
+
+        # Mask each text region by filling it with white color
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(conditioning_image)
         
-        # Adjust text positions
-        adjusted_positions = []
         for pos in text_positions:
             x1, y1, x2, y2 = pos
-            adjusted_x1 = x1 * scale + offset_x
-            adjusted_y1 = y1 * scale + offset_y
-            adjusted_x2 = x2 * scale + offset_x
-            adjusted_y2 = y2 * scale + offset_y
-            adjusted_positions.append([int(adjusted_x1), int(adjusted_y1), int(adjusted_x2), int(adjusted_y2)])
-        
-        # Create mask for the adjusted text regions
-        mask = create_text_mask(adjusted_positions, (self.target_size, self.target_size))
-        
-        # Mask the image (fill text region with neutral gray value 0.0 in [-1,1] range)
-        conditioning_image_tensor = mask_image_region(image_tensor, mask, fill_value=self.mask_fill_value)
-        
-        # Convert back to PIL for consistency
-        # First convert from [-1,1] to [0,1]
-        conditioning_array = ((conditioning_image_tensor + 1) / 2).permute(1, 2, 0).numpy()
-        conditioning_array = (conditioning_array * 255).astype('uint8')
-        conditioning_image = Image.fromarray(conditioning_array, mode='RGB')
-        
+            # Use white color (255, 255, 255) to fill the rectangle, matching the padding color
+            draw.rectangle([x1, y1, x2, y2], fill=(255, 255, 255))
+            
         return conditioning_image
-    
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
         Load a sample and process ALL valid text annotations.
@@ -342,26 +321,28 @@ class PosterDatasetStage1(Dataset):
                     idx = (original_idx + retry + 1) % len(self)
                     continue
                 
-                # 3. Create conditioning masks and images for ALL texts
+                # 3. Create conditioning images by masking the original PIL image
                 all_text_positions = [t['pos'] for t in valid_texts]
                 
-                # For SceneGenNet: mask ALL text regions
+                # Create conditioning images for both ControlNets
+                # The masking logic is now self-contained in _create_conditioning_image
                 scene_conditioning_image = self._create_conditioning_image(image, all_text_positions)
-                
-                # For TextRenderNet: also mask ALL text regions (will be rendered by our model)
                 text_render_conditioning_image = self._create_conditioning_image(image, all_text_positions)
+
+                # 4. Create the conditioning mask tensor (for VAE input)
+                # This needs to be done *after* resizing, so we do it on the transformed size
                 
-                # Create combined conditioning mask for all text regions (adjusted for padding)
-                combined_mask = torch.zeros(self.target_size, self.target_size)  # H x W, using target size
-                
-                # Get padding info for coordinate adjustment
-                orig_width, orig_height = image.size
-                scale = min(self.target_size / orig_height, self.target_size / orig_width)
+                # First, apply the resize and pad operation to get the final dimensions and scale
+                resized_padded_image_for_info = self._resize_with_padding(image, self.target_size)
+                padding_info = self._last_padding_info
+                scale = padding_info['scale']
+
+                combined_mask = torch.zeros(self.target_size, self.target_size) # H x W
                 
                 for text_pos in all_text_positions:
                     x1, y1, x2, y2 = text_pos
                     
-                    # Apply scaling only (no offset needed for top-left alignment)
+                    # Apply scaling to match the padded image coordinates
                     scaled_x1 = int(x1 * scale)
                     scaled_y1 = int(y1 * scale)
                     scaled_x2 = int(x2 * scale)
@@ -376,54 +357,45 @@ class PosterDatasetStage1(Dataset):
                     if scaled_x2 > scaled_x1 and scaled_y2 > scaled_y1:
                         combined_mask[scaled_y1:scaled_y2, scaled_x1:scaled_x2] = 1.0
                 
-                conditioning_mask_pil = Image.fromarray((combined_mask.numpy() * 255).astype('uint8'), mode='L')
+                # Add channel dimension for transform compatibility
+                conditioning_mask = combined_mask.unsqueeze(0) # 1 x H x W
                 
-                # 4. Prepare text data - combine all texts for processing
+                # 5. Prepare text data
                 combined_content = ' '.join([t['content'] for t in valid_texts])
                 
-                # 5. Tokenize the combined text content
+                # 6. Tokenize the combined text content
                 tokenized_text = self.tokenizer.encode_text(
                     combined_content,
                     max_length=self.max_seq_length,
                     add_special_tokens=True,
-                    use_recursive=False,  # Simple decomposition for training efficiency
-                    enhance_rare_chars=False  # No complex enhancement for training
+                    use_recursive=False,
+                    enhance_rare_chars=False
                 )
                 
-                # 6. Apply transformations to images
+                # 7. Apply transformations to all images now
                 pixel_values = self.image_transforms(image)
                 scene_conditioning_pixel_values = self.image_transforms(scene_conditioning_image)
                 text_render_conditioning_pixel_values = self.image_transforms(text_render_conditioning_image)
-                conditioning_mask = self.mask_transforms(conditioning_mask_pil)
                 
-                # 7. Get the prompt
+                # The conditioning_mask is already a tensor, so no ToTensor or Normalize needed
+                # It should be a [1, H, W] tensor with values 0 or 1.
+                
+                # 8. Get the prompt
                 prompt = annotation.get(self.prompt_key, "")
                 if not prompt:
                     logger.debug(f"Sample {self.samples[idx]} has an empty prompt.")
 
-                # 8. Prepare all text positions and info (adjusted for padding and scaling)
-                orig_width, orig_height = image.size
-                
-                # Get padding info from the last resize operation
-                if hasattr(self, '_last_padding_info'):
-                    padding_info = self._last_padding_info
-                    scale = padding_info['scale']
-                    offset_x, offset_y = padding_info['offset']
-                else:
-                    # Fallback if padding info is not available (top-left alignment)
-                    scale = min(self.target_size / orig_height, self.target_size / orig_width)
-                    offset_x, offset_y = 0, 0  # No offset for top-left alignment
-                
+                # 9. Prepare all text positions and info (adjusted for padding and scaling)
                 all_texts_info = []
                 for text_info in valid_texts:
                     # Original coordinates
                     x1, y1, x2, y2 = text_info['pos']
                     
-                    # Apply scaling and offset to match the padded image
-                    scaled_x1 = x1 * scale + offset_x
-                    scaled_y1 = y1 * scale + offset_y
-                    scaled_x2 = x2 * scale + offset_x
-                    scaled_y2 = y2 * scale + offset_y
+                    # Apply scaling to match the padded image
+                    scaled_x1 = x1 * scale
+                    scaled_y1 = y1 * scale
+                    scaled_x2 = x2 * scale
+                    scaled_y2 = y2 * scale
                     
                     # Normalize to [0, 1] based on target size (1024x1024)
                     text_pos_norm = [
@@ -453,7 +425,11 @@ class PosterDatasetStage1(Dataset):
                     "prompt": prompt,
                     "text_content": combined_content,
                     "all_texts_info": all_texts_info,
-                    "sample_id": self.samples[idx]
+                    "sample_id": self.samples[idx],
+                    "post_process_info": {
+                        'original_size': image.size,
+                        'new_size': self._last_padding_info['new_size']
+                    }
                 }
                 
             except Exception as e:
@@ -510,6 +486,9 @@ class PosterDatasetStage1(Dataset):
         
         # Handle all texts info
         all_texts_info = [item["all_texts_info"] for item in batch]
+
+        # Handle post_process_info
+        post_process_info = [item["post_process_info"] for item in batch]
         
         return {
             "pixel_values": pixel_values,
@@ -523,7 +502,8 @@ class PosterDatasetStage1(Dataset):
             "prompt": prompts,
             "text_content": text_content,
             "sample_ids": sample_ids,
-            "all_texts_info": all_texts_info
+            "all_texts_info": all_texts_info,
+            "post_process_info": post_process_info
         }
 
 
