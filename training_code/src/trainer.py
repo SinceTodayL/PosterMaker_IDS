@@ -16,7 +16,7 @@ from pathlib import Path
 from tqdm import tqdm
 from tqdm.auto import tqdm as auto_tqdm
 import json
-from torchvision.utils import save_image
+
 from transformers import (
     CLIPTextModelWithProjection,
     CLIPTokenizer,
@@ -573,7 +573,70 @@ class Trainer:
             logger.error(f"Error in transformer prediction: {e}")
             raise
         
-        # 7. Calculate loss
+        # 7. Save training comparison images: input vs reconstructed text regions
+        if self.global_step % 2 == 0:  # Save every 2 steps
+            try:
+                with torch.no_grad():
+                    import os
+                    from torchvision.utils import save_image
+                    os.makedirs('./training_output/training_comparison', exist_ok=True)
+                    
+                    # 1. Get original input images (denormalized)
+                    original_images = (batch['pixel_values'] / 2 + 0.5).clamp(0, 1)
+                    
+                    # 2. Calculate reconstructed latents: original - noise + predicted_noise
+                    # This simulates what the model "thinks" the denoised image should look like
+                    reconstructed_latents = latents - noise + model_pred
+                    
+                    # Scale back to VAE input range
+                    scaling_factor = getattr(self.models['vae'].config, 'scaling_factor', 0.13025)
+                    reconstructed_latents_scaled = reconstructed_latents / scaling_factor
+                    
+                    # Decode to pixel space and denormalize
+                    reconstructed_images = self.models['vae'].decode(reconstructed_latents_scaled).sample
+                    reconstructed_images = (reconstructed_images / 2 + 0.5).clamp(0, 1)
+                    
+                    # 3. Get text mask for pixel space (resize to image dimensions)
+                    if 'conditioning_mask' in batch:
+                        text_mask_pixel = torch.nn.functional.interpolate(
+                            batch['conditioning_mask'].float(), 
+                            size=(original_images.shape[2], original_images.shape[3]), 
+                            mode='nearest'
+                        )
+                        
+                        # 4. Create masked versions showing only text regions
+                        # Original text regions (white background for non-text areas)
+                        original_text_only = original_images * text_mask_pixel + (1 - text_mask_pixel)
+                        
+                        # Reconstructed text regions (white background for non-text areas)
+                        reconstructed_text_only = reconstructed_images * text_mask_pixel + (1 - text_mask_pixel)
+                        
+                        # 5. Create comparison: [original_full, reconstructed_full, original_text, reconstructed_text]
+                        comparison_images = torch.cat([
+                            original_images, 
+                            reconstructed_images,
+                            original_text_only,
+                            reconstructed_text_only
+                        ], dim=0)
+                        
+                        # Save comparison
+                        save_path = f'./training_output/training_comparison/step_{self.global_step}_comparison.png'
+                        save_image(comparison_images, save_path, nrow=4, normalize=False)
+                        
+                        print(f"Saved training comparison: original_full | reconstructed_full | original_text | reconstructed_text")
+                        print(f"  -> {save_path}")
+                        
+                    else:
+                        # Fallback: save original vs reconstructed only
+                        comparison_images = torch.cat([original_images, reconstructed_images], dim=0)
+                        save_path = f'./training_output/training_comparison/step_{self.global_step}_basic.png'
+                        save_image(comparison_images, save_path, nrow=2, normalize=False)
+                        print(f"Saved basic comparison (no mask available): {save_path}")
+                    
+            except Exception as e:
+                print(f"Warning: Failed to save training comparison images: {e}")
+        
+        # 8. Calculate loss
         loss = self._calculate_loss(model_pred, noise, batch)
         
         return loss
@@ -595,38 +658,43 @@ class Trainer:
             torch.Tensor: Computed loss value
         """
         # Primary denoising loss (MSE between predicted and target noise)
-        # - NEW: Crop tensors to the valid region before calculating loss ---
+        # According to PosterMaker paper: noise is added to full image, but loss is calculated only on text regions
         
-        # Get the new_size from the batch's post_process_info
-        # In a batch, all images are resized to the same dimensions,
-        # so we can take the info from the first sample.
-        if 'post_process_info' in batch and batch['post_process_info']:
-            # batch['post_process_info'] is a list of dicts
-            new_h, new_w = batch['post_process_info'][0]['new_size']
+        # Get text mask and resize to latent space
+        if 'conditioning_mask' in batch:
+            # conditioning_mask is (batch_size, 1, H, W) where H,W = 1024
+            text_mask = batch['conditioning_mask'].float()  # Ensure float type
             
-            # The VAE output latents are smaller than the input image.
-            # We need to calculate the corresponding size in the latent space.
-            # Input is 1024x1024, latent is typically H/8 x W/8.
-            latent_h = predicted_noise.shape[2]
-            latent_w = predicted_noise.shape[3]
+            # Resize mask to match latent dimensions
+            latent_h, latent_w = predicted_noise.shape[2], predicted_noise.shape[3]
+            text_mask_latent = torch.nn.functional.interpolate(
+                text_mask, 
+                size=(latent_h, latent_w), 
+                mode='nearest'
+            )
             
-            # Assume target_size used in dataset was 1024
-            scale_h = latent_h / 1024
-            scale_w = latent_w / 1024
+            # Apply mask to both predicted and target noise (only calculate loss on text regions)
+            masked_predicted = predicted_noise * text_mask_latent
+            masked_target = target_noise * text_mask_latent
             
-            # Calculate the crop dimensions in latent space
-            crop_h = int(new_h * scale_h)
-            crop_w = int(new_w * scale_w)
+            # Calculate MSE loss only on masked regions
+            # Use sum reduction and normalize by the number of masked pixels
+            total_loss = F.mse_loss(
+                masked_predicted.float(), 
+                masked_target.float(), 
+                reduction="sum"
+            ) / (text_mask_latent.sum() + 1e-8)  # Avoid division by zero
             
-            # Crop the tensors
-            predicted_noise = predicted_noise[:, :, :crop_h, :crop_w]
-            target_noise = target_noise[:, :, :crop_h, :crop_w]
-
-        total_loss = F.mse_loss(
-            predicted_noise.float(), 
-            target_noise.float(), 
-            reduction="mean"
-        )
+            print(f"Text mask coverage: {text_mask_latent.mean().item():.4f} ({text_mask_latent.sum().item():.0f} pixels)")
+            
+        else:
+            # Fallback: calculate loss on full image if no mask available
+            total_loss = F.mse_loss(
+                predicted_noise.float(), 
+                target_noise.float(), 
+                reduction="mean"
+            )
+            print("Warning: No conditioning_mask found, using full image loss")
         
         # Extensibility point for future reward terms
         # Additional loss terms can be added here in future stages:
@@ -811,33 +879,8 @@ class Trainer:
             # Post-process images: denormalize from [-1, 1] to [0, 1]
             images = (images / 2 + 0.5).clamp(0, 1)
             
-            # --- Save Images ---
-            output_dir = os.path.join(self.config['output_dir'], 'validation_samples')
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # Save generated images
-            save_path = os.path.join(output_dir, f"generated_epoch_{epoch}_step_{step}.png")
-            save_image(images, save_path, nrow=2, normalize=False)
-            
-            # Also save the conditioning images for comparison
-            scene_cond_save_path = os.path.join(output_dir, f"scene_cond_epoch_{epoch}_step_{step}.png")
-            scene_cond_images = (scene_cond / 2 + 0.5).clamp(0, 1)  # Denormalize
-            save_image(scene_cond_images, scene_cond_save_path, nrow=2, normalize=False)
-
-            text_cond_save_path = os.path.join(output_dir, f"text_cond_epoch_{epoch}_step_{step}.png")
-            text_cond_images = (text_cond / 2 + 0.5).clamp(0, 1)  # Denormalize
-            save_image(text_cond_images, text_cond_save_path, nrow=2, normalize=False)
-            
-            # Save original images for reference
-            original_save_path = os.path.join(output_dir, f"original_epoch_{epoch}_step_{step}.png")
-            original_images = (val_batch['pixel_values'] / 2 + 0.5).clamp(0, 1)  # Denormalize
-            save_image(original_images, original_save_path, nrow=2, normalize=False)
-            
-            print(f"✓ Validation images saved:")
-            print(f"  Generated: {save_path}")
-            print(f"  Scene Conditioning: {scene_cond_save_path}")
-            print(f"  Text Conditioning: {text_cond_save_path}")
-            print(f"  Original: {original_save_path}")
+            # Validation images generation completed
+            print(f"✓ Validation generation completed at step {step}")
 
         except Exception as e:
             print(f"Error in validation image generation: {e}")

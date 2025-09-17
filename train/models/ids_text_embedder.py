@@ -1,12 +1,7 @@
 """
-IDS-based Text Embedder for TextRenderNet
-
+    IDS_TextEmbedder
 """
 
-"""
-Optimized for LoRA training and architectural improvements
-Modified for configurable paths in training pipeline
-"""
 
 import torch
 import torch.nn as nn
@@ -20,7 +15,6 @@ from ..utils.text_utils import normalize_coordinates, pos2coords, get_positional
 
 
 class IDSEmbedding(nn.Module):
-    """IDS Token Embedding with positional and structural encoding"""
     
     def __init__(self, vocab_size: int, embed_dim: int = 64, 
                  max_seq_length: int = 512, dropout: float = 0.1,
@@ -31,16 +25,14 @@ class IDSEmbedding(nn.Module):
         self.embed_dim = embed_dim
         self.max_seq_length = max_seq_length
         
-        # Core embeddings - these will be LoRA targets
         self.token_embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
         self.token_type_embedding = nn.Embedding(2, embed_dim)  # structure vs component
         self.position_embedding = nn.Embedding(max_seq_length, embed_dim)
         
-        # Layer normalization and dropout
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
         
-        # Load pre-trained character features for initialization if available
+        # Load pre-trained character features for initialization
         self.char2feat = None
         if char2feat_path:
             try:
@@ -64,23 +56,14 @@ class IDSEmbedding(nn.Module):
         with torch.no_grad():
             self.token_embedding.weight[0].fill_(0)
             
-        # Align with pre-trained char2feat if available
-        if self.char2feat is not None:
-            self.set_char2feat_alignment(self.tokenizer, alignment_weight=0.5)
-            
         
     def set_char2feat_alignment(self, tokenizer, alignment_weight: float = 0.5):
-        """
-        Set alignment between IDS tokens and pre-trained character features
-        
-        Args:
-            tokenizer: IDSTokenizer instance for token mapping
-            alignment_weight: Weight for blending char2feat with random init (0.0-1.0)
-        """
+
         if self.char2feat is None:
+            print("Nothing to do in set_char2feat_alignment()")
             return
             
-        print("Performing char2feat alignment...")
+        # print("Performing char2feat alignment...")
         aligned_count = 0
         
         with torch.no_grad():
@@ -103,26 +86,22 @@ class IDSEmbedding(nn.Module):
         
     def forward(self, input_ids: torch.Tensor, token_type_ids: torch.Tensor, 
                 attention_mask: torch.Tensor) -> torch.Tensor:
-        """Forward pass of IDS embedding"""
+
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
         
-        # Position IDs
         position_ids = torch.arange(seq_len, device=device).expand(batch_size, -1)
         
-        # Get embeddings
         token_embeds = self.token_embedding(input_ids)
         type_embeds = self.token_type_embedding(token_type_ids)
         pos_embeds = self.position_embedding(position_ids)
         
-        # Combine embeddings
+        # Combine
         embeddings = token_embeds + type_embeds + pos_embeds
         
-        # Apply layer norm and dropout
         embeddings = self.layer_norm(embeddings)
         embeddings = self.dropout(embeddings)
         
-        # Apply attention mask
         embeddings = embeddings * attention_mask.unsqueeze(-1)
         
         return embeddings
@@ -175,19 +154,15 @@ class IDSStructuralAttention(nn.Module):
         self.layer_norm2 = nn.LayerNorm(embed_dim)
         
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (batch_size, seq_len, embed_dim)
-            attention_mask: (batch_size, seq_len)
-        """
-        # Self-attention with residual connection
-        attn_mask = attention_mask.unsqueeze(1).expand(-1, x.size(1), -1)
+
+        attn_mask = attention_mask  
+        attn_mask = attn_mask.float()
         attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf'))
+        attn_mask = attn_mask.masked_fill(attn_mask == 1, 0.0)
         
-        attn_out, _ = self.structural_attention(x, x, x, attn_mask=attn_mask)
+        attn_out, _ = self.structural_attention(x, x, x, key_padding_mask=(attention_mask == 0))
         x = self.layer_norm1(x + attn_out)
         
-        # Feed-forward with residual connection
         ffn_out = self.ffn(x)
         x = self.layer_norm2(x + ffn_out)
         
@@ -195,11 +170,6 @@ class IDSStructuralAttention(nn.Module):
 
 
 class IDSTextEmbedder(nn.Module):
-    """
-    IDS-based Text Embedder for PosterMaker TextRenderNet
-    Designed for LoRA training and architectural improvements
-    Modified for configurable paths in training pipeline
-    """
     
     def __init__(self, ids_database_path: str, vocab_file: Optional[str] = None,
                  ids_embed_dim: int = 64, max_seq_length: int = 128,
@@ -210,7 +180,6 @@ class IDSTextEmbedder(nn.Module):
                  char2feat_alignment_weight: float = 0.5):
         super().__init__()
         
-        # IDS tokenizer and embedding with configurable paths
         self.tokenizer = IDSTokenizer(
             ids_database_path=ids_database_path,
             vocab_file=vocab_file,
@@ -220,39 +189,32 @@ class IDSTextEmbedder(nn.Module):
             vocab_size=self.tokenizer.vocab_size,
             embed_dim=ids_embed_dim,
             max_seq_length=max_seq_length,
-            char2feat_path=char2feat_path  # Pass char2feat path for initialization
+            char2feat_path=char2feat_path  
         )
         
-        # Perform char2feat alignment after tokenizer is available
         if char2feat_alignment_weight > 0 and char2feat_path:
             self.ids_embedding.set_char2feat_alignment(
                 self.tokenizer, char2feat_alignment_weight
             )
         
-        # Structural attention for IDS hierarchical understanding
         self.use_structural_attention = use_structural_attention
         if use_structural_attention:
             self.structural_attention = IDSStructuralAttention(
                 embed_dim=ids_embed_dim, num_heads=4
             )
         
-        # Text layout parameters (matching original TextEmbedder)
         self.max_num_texts = max_num_texts
         self.char_padding_to_len = max_chars_per_text  # 16
         self.char_pos_encoding_dim = 32
         self.text_pos_encoding_dim = 32
         self.input_size = input_size
         
-        # Spatial positional encoding
         self.fourier_embedder = FourierEmbedder(num_freqs=self.text_pos_encoding_dim // (4*2))
         
-        # CRITICAL FIX: No arbitrary dimension expansion
-        # The final feature dimension should match original TextEmbedder logic:
         # ids_embed_dim (64) + char_pos_encoding_dim (32) + text_pos_encoding_dim (32) = 128
         assert ids_embed_dim + self.char_pos_encoding_dim + self.text_pos_encoding_dim == 128, \
             "Feature dimensions must sum to 128 to match original architecture"
             
-        # Sequence pooling for variable-length IDS sequences
         self.sequence_pooler = nn.Sequential(
             nn.Linear(ids_embed_dim, ids_embed_dim),
             nn.Tanh()
@@ -261,7 +223,7 @@ class IDSTextEmbedder(nn.Module):
     def encode_single_text(self, text_content: str, max_length: int = None) -> Dict[str, torch.Tensor]:
         """Encode a single text string to IDS tokens"""
         if max_length is None:
-            max_length = 64  # Reduced from 128 for memory efficiency
+            max_length = 64  
             
         encoding = self.tokenizer.encode_text(
             text_content, 
@@ -291,21 +253,18 @@ class IDSTextEmbedder(nn.Module):
         seq_len, embed_dim = ids_embeddings.shape
         
         if seq_len <= self.char_padding_to_len:
-            # Pad if sequence is shorter
             padding = torch.zeros(
                 self.char_padding_to_len - seq_len, embed_dim, 
                 device=ids_embeddings.device, dtype=ids_embeddings.dtype
             )
             pooled_features = torch.cat([ids_embeddings, padding], dim=0)
             
-            # Update attention mask
             mask_padding = torch.zeros(
                 self.char_padding_to_len - seq_len,
                 device=attention_mask.device, dtype=attention_mask.dtype
             )
             pooled_mask = torch.cat([attention_mask, mask_padding], dim=0)
         else:
-            # Use stride-based pooling for longer sequences
             stride = seq_len / self.char_padding_to_len
             pooled_features = []
             pooled_mask = []
@@ -319,7 +278,6 @@ class IDSTextEmbedder(nn.Module):
                     segment_mask = attention_mask[start_idx:end_idx].float()
                     
                     if torch.sum(segment_mask) > 0:
-                        # Weighted average pooling
                         weighted_features = torch.sum(
                             segment_features * segment_mask.unsqueeze(-1), dim=0
                         ) / torch.sum(segment_mask)
@@ -338,11 +296,7 @@ class IDSTextEmbedder(nn.Module):
         return pooled_features, pooled_mask
     
     def forward(self, texts: List[Dict[str, Any]]) -> torch.Tensor:
-        """
-        Forward pass of IDS Text Embedder
-        Returns features with shape (max_token_num, final_feature_dim)
-        where final_feature_dim = 128 (64 + 32 + 32)
-        """
+
         device = next(self.parameters()).device
         
         # Process each text to get IDS features
@@ -353,8 +307,7 @@ class IDSTextEmbedder(nn.Module):
             content = text_info['content']
             
             # 1. Encode to IDS tokens
-            encoding = self.encode_single_text(content)
-            
+            encoding = self.encode_single_text(content)  
             # Move to device
             input_ids = encoding['input_ids'].to(device)
             attention_mask = encoding['attention_mask'].to(device)
@@ -426,18 +379,18 @@ class IDSTextEmbedder(nn.Module):
                 torch.zeros((padding_token_num, 128), device=device)
             )
         
-        texts_all_features = torch.cat(texts_and_sep_list, dim=0)  # (112, 128)
+        texts_all_features = torch.cat(texts_and_sep_list, dim=0)  # (, 128)
         
-        return texts_all_features  # (112, 128) - correct output shape
+        return texts_all_features  # (, 128) - correct output shape
     
     def get_text_embeds_batch(self, batch_texts: List[List[Dict[str, Any]]]) -> torch.Tensor:
-        """Process batch of text lists"""
+
         batch_embeds = []
         for texts in batch_texts:
             text_embeds = self.forward(texts)
             batch_embeds.append(text_embeds)
 
-        batch_embeds = torch.stack(batch_embeds, dim=0)  # (batch_size, 112, 128)
+        batch_embeds = torch.stack(batch_embeds, dim=0)  # (batch_size, , 128)
         return batch_embeds
     
     def forward_tokenized_batch(self, input_ids: torch.Tensor, 
@@ -531,9 +484,10 @@ class IDSTextEmbedder(nn.Module):
         batch_tensor = torch.stack(batch_outputs, dim=0)  # (batch_size, 112, 128)
         
         return batch_tensor
-    
+
+"""
     def get_lora_target_modules(self) -> List[str]:
-        """Return module names that should be targeted by LoRA"""
+        # Return module names that should be targeted by LoRA
         lora_targets = [
             # IDS embedding layers
             "ids_embedding.token_embedding",
@@ -556,3 +510,4 @@ class IDSTextEmbedder(nn.Module):
                           if not target.startswith("structural_attention")]
         
         return lora_targets
+"""
