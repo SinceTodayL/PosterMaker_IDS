@@ -509,5 +509,4 @@ class IDSTextEmbedder(nn.Module):
             lora_targets = [target for target in lora_targets 
                           if not target.startswith("structural_attention")]
         
-        return lora_targets
-"""
+        return lora_targets"""
