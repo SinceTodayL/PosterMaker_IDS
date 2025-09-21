@@ -108,7 +108,7 @@ class SD3ControlNetModel(
     @register_to_config
     def __init__(
         self,
-        sample_size: int = 128,
+        sample_size: int = 128,  # This is latent size, should remain 128
         patch_size: int = 2,
         in_channels: int = 16,
         num_layers: int = 18,
@@ -118,7 +118,7 @@ class SD3ControlNetModel(
         caption_projection_dim: int = 1152,
         pooled_projection_dim: int = 2048,
         out_channels: int = 16,
-        pos_embed_max_size: int = 96,
+        pos_embed_max_size: int = 192,  # Updated from config for 1024x1024
         conditioning_embedding_out_channels: Optional[Tuple[int, ...]] = (
             16,
             32,

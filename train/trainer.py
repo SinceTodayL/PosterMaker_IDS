@@ -2,12 +2,14 @@
 Trainer
 """
 
+import os
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Dict, Any, Optional, Tuple, List
-import os
 import logging
 import time
 from pathlib import Path
@@ -24,7 +26,6 @@ from transformers import (
     T5TokenizerFast,
 )
 
-from .model_loader import save_model_checkpoint, count_trainable_parameters
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +70,6 @@ class Trainer:
         self.device = device
         self.scheduler = scheduler
         
-        # Unpack text encoders and tokenizers for convenience
         self.text_encoder = self.models['text_encoder']
         self.text_encoder_2 = self.models['text_encoder_2']
         self.text_encoder_3 = self.models['text_encoder_3']
@@ -95,7 +95,7 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         
         # Output directories
-        self.output_dir = Path(config.get('output_dir', './training_output'))
+        self.output_dir = Path(config.get('output_dir', '../training_output'))
         self.checkpoint_dir = self.output_dir / 'checkpoints'
         self.log_dir = self.output_dir / 'logs'
         
@@ -108,39 +108,39 @@ class Trainer:
         self.val_losses = []
         self.learning_rates = []
         
-        # Setup logging
         self._setup_logging()
-        
-        # Log initialization info
         self._log_initialization_info()
         
-        logger.info("Trainer initialized successfully for training")
+        # logger.info("Trainer initialized successfully for training")
     
     def _setup_logging(self):
-        """Setup file logging for training progress."""
         log_file = self.log_dir / f'training_{int(time.time())}.log'
         
-        # Create file handler
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.INFO)
         
-        # Create formatter
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
         file_handler.setFormatter(formatter)
         
-        # Add handler to logger
         logger.addHandler(file_handler)
-        
         logger.info(f"Training logs will be saved to: {log_file}")
+    
+    def _count_parameters(self):
+        param_counts = {}
+        for name, model in self.models.items():
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in model.parameters())
+            param_counts[name] = {'trainable': trainable, 'total': total}
+        return param_counts
     
     def _log_initialization_info(self):
         """Log important information about the training setup."""
         # Log model parameter counts
-        param_counts = count_trainable_parameters(self.models)
+        param_counts = self._count_parameters()
         
-        logger.info("=== Training Setup Information ===")
+        logger.info("==== Training Setup Information ====")
         logger.info(f"Device: {self.device}")
         logger.info(f"Mixed Precision: {self.use_amp}")
         logger.info(f"Gradient Accumulation Steps: {self.gradient_accumulation_steps}")
@@ -158,11 +158,11 @@ class Trainer:
             total_trainable += counts['trainable']
             total_params += counts['total']
         
-        logger.info(f"Total: {total_trainable:,} trainable / {total_params:,} total ({total_trainable/total_params*100:.1f}%)")
+        # logger.info(f"Total: {total_trainable:,} trainable / {total_params:,} total ({total_trainable/total_params*100:.1f}%)")
         logger.info("=" * 50)
     
     #
-    # Prompt Encoding Logic (Copied and Adapted from pipeline_sd3.py) 
+    # Prompt Encoding
     #
     
     @torch.no_grad()
@@ -170,8 +170,6 @@ class Trainer:
         self, prompt: List[str], num_images_per_prompt: int = 1
     ):
         """Helper to get T5 prompt embeds."""
-        # Run on the text encoder's device to avoid moving encoders to GPU
-        device = next(self.text_encoder_3.parameters()).device
         text_inputs = self.tokenizer_3(
             prompt,
             padding="max_length",
@@ -182,9 +180,10 @@ class Trainer:
         )
         text_input_ids = text_inputs.input_ids
         
-        prompt_embeds = self.text_encoder_3(text_input_ids.to(device))[0]
-        dtype = self.text_encoder_3.dtype
-        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+        # Text encoder is on CPU, process there then move result to GPU
+        prompt_embeds = self.text_encoder_3(text_input_ids.to("cpu"))[0]
+        # Keep embeddings in FP32 for compatibility with trainable models
+        prompt_embeds = prompt_embeds.to(dtype=torch.float32, device=self.device)
 
         return prompt_embeds
 
@@ -193,8 +192,6 @@ class Trainer:
         self, prompt: List[str], num_images_per_prompt: int = 1, clip_model_index: int = 0
     ):
         """Helper to get CLIP prompt embeds."""
-        # Run on the text encoder's device to avoid moving encoders to GPU
-        device = next(self.text_encoder.parameters()).device
         clip_tokenizers = [self.tokenizer, self.tokenizer_2]
         clip_text_encoders = [self.text_encoder, self.text_encoder_2]
 
@@ -210,15 +207,16 @@ class Trainer:
         )
 
         text_input_ids = text_inputs.input_ids
-        prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
+        
+        # Text encoder is on CPU, process there then move result to GPU
+        prompt_embeds = text_encoder(text_input_ids.to("cpu"), output_hidden_states=True)
         pooled_prompt_embeds = prompt_embeds[0]
-        prompt_embeds = prompt_embeds.hidden_states[-2] # last-but-one layer
+        prompt_embeds = prompt_embeds.hidden_states[-2]
 
-        # Move embeddings to main training device with the dtype used by transformer
-        main_device = self.device
-        main_dtype = self.models['transformer'].dtype
-        prompt_embeds = prompt_embeds.to(dtype=main_dtype, device=main_device)
-        pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=main_dtype, device=main_device)
+        # Move results to GPU - keep in FP32 for compatibility with trainable models
+        prompt_embeds = prompt_embeds.to(dtype=torch.float32, device=self.device)
+        pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=torch.float32, device=self.device)
+        
         return prompt_embeds, pooled_prompt_embeds
 
     @torch.no_grad()
@@ -230,18 +228,12 @@ class Trainer:
         device: Optional[torch.device] = None,
         num_images_per_prompt: int = 1,
     ):
-        """
-        Encodes the prompt into text embeddings. This is a simplified version of the
-        encode_prompt function from the original pipeline, adapted for training.
-        """
+
         device = device or self.device
-
-
 
         prompt_2 = prompt_2 or prompt
         prompt_3 = prompt_3 or prompt
 
-        # Get CLIP embeddings
         prompt_embed, pooled_prompt_embed = self._get_clip_prompt_embeds(
             prompt=prompt, num_images_per_prompt=num_images_per_prompt, clip_model_index=0
         )
@@ -250,7 +242,6 @@ class Trainer:
         )
         clip_prompt_embeds = torch.cat([prompt_embed, prompt_2_embed], dim=-1)
 
-        # Get T5 embeddings
         t5_prompt_embed = self._get_t5_prompt_embeds(
             prompt=prompt_3, num_images_per_prompt=num_images_per_prompt,
         )
@@ -266,7 +257,7 @@ class Trainer:
         return prompt_embeds, pooled_prompt_embeds
 
     def train(self):
-        """The main training loop."""
+
         logger.info("Starting training...")
         
         for epoch in range(self.num_epochs):
@@ -276,7 +267,7 @@ class Trainer:
             
             avg_train_loss = self._train_epoch()
             
-            if not math.isnan(avg_train_loss):  # Check if training was successful
+            if not math.isnan(avg_train_loss):
                 logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_train_loss:.6f}")
                 
                 if self.validation_mode == 'epoch':
@@ -290,10 +281,6 @@ class Trainer:
                         self._save_checkpoint(epoch, is_best=True)
             else:
                 logger.error(f"Epoch {epoch+1} failed completely (NaN loss). Skipping validation.")
-                print(f"❌ Epoch {epoch+1} failed - no successful training steps!")
-            
-            # Note: save_steps should be handled per training step, not per epoch
-            # This will be handled in the training step loop instead
             
             self._save_training_metrics()
         
@@ -314,38 +301,83 @@ class Trainer:
         # Set trainable models to train mode
         self.models['ids_text_embedder'].train()
         self.models['adapter'].train()
+        self.models['text_render_net'].train()  # Partially trainable
         
-        # Set frozen models to eval mode
+        # Set frozen models to eval mode and enable gradient checkpointing for memory efficiency
         self.models['vae'].eval()
         self.models['transformer'].eval()
-        self.models['text_render_net'].eval()
         self.models['scene_gen_net'].eval()
+        
+        # Enable gradient checkpointing on trainable models to save memory
+        if hasattr(self.models['text_render_net'], 'enable_gradient_checkpointing'):
+            self.models['text_render_net'].enable_gradient_checkpointing()
+        if hasattr(self.models['ids_text_embedder'], 'enable_gradient_checkpointing'):
+            self.models['ids_text_embedder'].enable_gradient_checkpointing()
+        if hasattr(self.models['adapter'], 'enable_gradient_checkpointing'):
+            self.models['adapter'].enable_gradient_checkpointing()
+        
+        # Enable gradient checkpointing on frozen models for memory efficiency
+        if hasattr(self.models['transformer'], 'enable_gradient_checkpointing'):
+            self.models['transformer'].enable_gradient_checkpointing()
+        if hasattr(self.models['scene_gen_net'], 'enable_gradient_checkpointing'):
+            self.models['scene_gen_net'].enable_gradient_checkpointing()
         
         epoch_losses = []
         progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {self.current_epoch + 1}")
         
         for step, batch in enumerate(progress_bar):
             try:
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                # Use autocast when AMP is enabled
+                if self.use_amp:
+                    with torch.cuda.amp.autocast():
+                        loss = self._train_step(batch)
+                        loss = loss / self.gradient_accumulation_steps
+                else:
                     loss = self._train_step(batch)
                     loss = loss / self.gradient_accumulation_steps
                 
-                # Backward pass
-                self.scaler.scale(loss).backward()
+                # Backward pass with scaler when AMP enabled
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
                 
                 # Gradient accumulation
                 if (step + 1) % self.gradient_accumulation_steps == 0:
                     # Check training health BEFORE clearing gradients
-                    if self.global_step % 100 == 0:
-                        accumulated_loss = loss.item() * self.gradient_accumulation_steps
-                        is_healthy, grad_norm, warnings = self._check_training_health(accumulated_loss)
-                        if not is_healthy:
+                    accumulated_loss = loss.item() * self.gradient_accumulation_steps
+                    is_healthy, grad_norm, warnings = self._check_training_health(accumulated_loss)
+                    if not is_healthy:
+                        if self.global_step % 10 == 0:  # Don't spam warnings
                             print(f"⚠️  Training Health Warning at step {self.global_step}:")
                             for warning in warnings:
                                 print(f"    - {warning}")
+                        
+                        # Skip training step if gradients are exploding
+                        if grad_norm > 10.0 or not torch.isfinite(torch.tensor(grad_norm)):
+                            logger.warning(f"Skipping step due to gradient explosion: {grad_norm}")
+                            self.optimizer.zero_grad()
+                            torch.cuda.empty_cache()
+                            continue
                     
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                    # Optimizer step with or without scaler
+                    if self.use_amp:
+                        if self.stage1_config.get('max_grad_norm', None):
+                            self.scaler.unscale_(self.optimizer)
+                            torch.nn.utils.clip_grad_norm_(
+                                [p for name in ['ids_text_embedder', 'adapter', 'text_render_net'] for p in self.models[name].parameters() if p.requires_grad],
+                                self.stage1_config['max_grad_norm']
+                            )
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        if self.stage1_config.get('max_grad_norm', None):
+                            torch.nn.utils.clip_grad_norm_(
+                                [p for name in ['ids_text_embedder', 'adapter', 'text_render_net'] for p in self.models[name].parameters() if p.requires_grad],
+                                self.stage1_config['max_grad_norm']
+                            )
+                        self.optimizer.step()
+                    
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad()
                     
@@ -387,13 +419,21 @@ class Trainer:
                     'acc': f'{(step + 1) % self.gradient_accumulation_steps}/{self.gradient_accumulation_steps}'
                 })
                 
+                # Aggressive memory cleanup every step
+                torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+                
             except RuntimeError as e:
                 error_msg = str(e).lower()
                 if "out of memory" in error_msg:
                     logger.error(f"CUDA OOM at step {step}. Skipping batch and clearing cache.")
-                    torch.cuda.empty_cache()
-                    # Reset gradient accumulation to maintain consistency
+                    # Aggressive cleanup on OOM
                     self.optimizer.zero_grad()
+                    torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()  # Second pass
                     continue
                 elif "nan" in error_msg or "inf" in error_msg:
                     logger.error(f"NaN/Inf detected at step {step}: {e}")
@@ -464,6 +504,11 @@ class Trainer:
         # Forward pass through the complete pipeline
         loss = self._forward_pass(batch)
         
+        # Ensure we never return None to avoid cascade errors
+        if loss is None:
+            logger.error("Forward pass returned None, using dummy loss")
+            loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        
         return loss
     
     def _forward_pass(self, batch: Dict[str, Any]) -> torch.Tensor:
@@ -476,14 +521,17 @@ class Trainer:
         """
         # 1. Encode images to latent space
         with torch.no_grad():
-            # Scale factor for SD3 VAE (typically 0.13025)
-            scaling_factor = getattr(self.models['vae'].config, 'scaling_factor', 0.13025)
-            logger.info(f"Scaling factor: {scaling_factor}")
-            logger.info(f"Batch pixel values shape: {batch['pixel_values'].shape}")
-            latents = self.models['vae'].encode(batch['pixel_values']).latent_dist.sample()
-            logger.info(f"Latents shape: {latents.shape}")
-            latents = latents * scaling_factor
-            logger.info(f"Latents shape after scaling: {latents.shape}")
+            # SD3 VAE encoding: (latents - shift_factor) * scaling_factor
+            scaling_factor = getattr(self.models['vae'].config, 'scaling_factor', 1.5305)
+            shift_factor = getattr(self.models['vae'].config, 'shift_factor', 0.0609)
+            
+            # VAE is on GPU with FP16, convert data accordingly
+            pixel_values = batch['pixel_values'].to(device=self.device, dtype=torch.float16)
+            latents = self.models['vae'].encode(pixel_values).latent_dist.sample()
+            latents = (latents - shift_factor) * scaling_factor
+            
+            # Clear pixel_values immediately to save memory
+            del pixel_values
         
         # 2. Sample noise and timesteps for diffusion process
         noise = torch.randn_like(latents)
@@ -495,50 +543,52 @@ class Trainer:
         
         # 3. Add noise to latents (forward diffusion process)
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
-        logger.info(f"Noisy latents shape: {noisy_latents.shape}")
         
-        # 4. Get text conditioning from our new IDS-based modules for TextRenderNet
+        # Clear intermediate variables to save memory
+        torch.cuda.empty_cache()
+        
+        # 4. Get text conditioning from IDS-based modules for TextRenderNet
+        batch_size = batch['pixel_values'].shape[0]
+        projection_dim = self.models['transformer'].config.joint_attention_dim
+        
         try:
-            # Use all_texts_info which contains ALL texts from each sample
-            batch_texts = batch['all_texts_info']  # List[List[Dict]] format expected by embedder
-            logger.info(f"Processing {len(batch_texts)} samples with multiple texts each")
-            
-            # DEBUG: Print actual text content to verify
-            for i, sample_texts in enumerate(batch_texts):
-                logger.info(f"Sample {i} has {len(sample_texts)} texts:")
-                for j, text_info in enumerate(sample_texts):
-                    logger.info(f"  Text {j}: '{text_info['content']}' at pos {text_info['pos']}")
-                logger.info(f"Sample {i} combined content: '{batch['text_content'][i]}'")
-            
+            # IDS text embedder expects List[List[Dict]], but we have List[Dict] per sample
+            # Need to wrap each sample's texts in a list for the batch
+            batch_texts = [batch['all_texts_info']]  # Wrap single sample's texts in a list
             text_embeds = self.models['ids_text_embedder'].get_text_embeds_batch(
                 batch_texts=batch_texts
-            )  # (batch_size, 112, 128) - token-level features
-            logger.info(f"Text embeds shape: {text_embeds.shape}")
-            
-            # Transform through adapter to get conditioning features for TextRenderNet
-            text_render_features = self.models['adapter'](text_embeds)  # (batch_size, 112, projection_dim)
-            logger.info(f"Text render features shape: {text_render_features.shape}")
+            )
+            # Ensure dtype consistency for text processing pipeline
+            texts_embeds = text_embeds.to(device=self.device, dtype=torch.float32)  # Keep FP32 for processing
+            texts_embeds = self.models['adapter'](texts_embeds)
+            # text_render_net is now FP32, so no conversion needed
+            texts_embeds = texts_embeds.to(dtype=torch.float32)
 
         except Exception as e:
             logger.error(f"Error in text processing: {e}")
-            logger.error(f"Batch all_texts_info format: {type(batch.get('all_texts_info', 'missing'))}")
-            # Create fallback zero features to continue training
-            batch_size = batch['pixel_values'].shape[0]
-            projection_dim = self.models['transformer'].config.joint_attention_dim  # 4096
-            text_render_features = torch.zeros(
+            texts_embeds = torch.zeros(
                 batch_size, 112, projection_dim,
                 device=self.device, dtype=torch.float32
             )
-            logger.warning("Using zero text features as fallback")
         
         # 4.bis. Get prompt conditioning for SceneGenNet and the main Transformer
         try:
-            # The dataset provides a single 'prompt' list. We use it for all three encoders,
-            # which is the standard behavior when prompt_2 and prompt_3 are not provided.
             prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt=batch['prompt'])
         except Exception as e:
             logger.error(f"Error in prompt encoding: {e}")
-            return None
+            # Return fallback embeddings instead of None to avoid cascade errors
+            seq_len = 154  # Standard SD3 sequence length (77 + 77)
+            hidden_dim = self.models['transformer'].config.joint_attention_dim
+            pooled_dim = self.models['transformer'].config.pooled_projection_dim
+            
+            prompt_embeds = torch.zeros(
+                batch_size, seq_len, hidden_dim,
+                device=self.device, dtype=torch.float16
+            )
+            pooled_prompt_embeds = torch.zeros(
+                batch_size, pooled_dim,
+                device=self.device, dtype=torch.float16
+            )
 
         # 5. Get ControlNet guidance from both ControlNets
         try:
@@ -553,62 +603,100 @@ class Trainer:
             # 5.1 Prepare ControlNet conditioning in latent space
             with torch.no_grad():
                 # Encode scene conditioning image to latent space
-                scene_cond_latents = self.models['vae'].encode(batch['scene_conditioning_pixel_values']).latent_dist.sample()
-                scene_cond_latents = scene_cond_latents * scaling_factor
+                scene_cond_pixels = batch['scene_conditioning_pixel_values'].to(device=self.device, dtype=torch.float16)
+                scene_cond_latents = self.models['vae'].encode(scene_cond_pixels).latent_dist.sample()
+                scene_cond_latents = (scene_cond_latents - shift_factor) * scaling_factor
+                del scene_cond_pixels  # Free memory immediately
                 
-                # For SceneGenNet, we need to add mask channel (using conditioning_mask)
-                # Resize mask to latent space dimensions
-                conditioning_mask_resized = torch.nn.functional.interpolate(
-                    batch['conditioning_mask'], 
+                # Resize subject mask to latent space dimensions
+                subject_mask_resized = torch.nn.functional.interpolate(
+                    batch['subject_mask'], 
                     size=(scene_cond_latents.shape[2], scene_cond_latents.shape[3]),
                     mode='nearest'
                 )
-                # Concatenate image latents (16 channels) + mask (1 channel) = 17 channels
-                scene_controlnet_input = torch.cat([scene_cond_latents, conditioning_mask_resized], dim=1)
+                scene_controlnet_input = torch.cat([scene_cond_latents, subject_mask_resized], dim=1)
                 
-                # Encode text conditioning image to latent space (16 channels only)
-                text_cond_latents = self.models['vae'].encode(batch['text_render_conditioning_pixel_values']).latent_dist.sample()
-                text_cond_latents = text_cond_latents * scaling_factor
+                # Encode text conditioning image to latent space
+                text_cond_pixels = batch['text_render_conditioning_pixel_values'].to(device=self.device, dtype=torch.float16)
+                text_cond_latents = self.models['vae'].encode(text_cond_pixels).latent_dist.sample()
+                text_cond_latents = (text_cond_latents - shift_factor) * scaling_factor
                 text_controlnet_input = text_cond_latents
+                del text_cond_pixels  # Free memory immediately
 
-            # Get SceneGenNet residuals (expects 17 channels: 16 latent + 1 mask)
+            # Get SceneGenNet residuals
+            # scene_gen_net is FP16
+            scene_noisy_latents = noisy_latents.to(dtype=torch.float16)
+            scene_timesteps = timesteps.to(device=scene_noisy_latents.device)
+            scene_prompt_embeds = prompt_embeds.to(dtype=torch.float16)
+            scene_pooled_zeros = pooled_zeros.to(dtype=torch.float16)
+            scene_controlnet_input = scene_controlnet_input.to(dtype=torch.float16)
+            
             scene_control_output = self.models['scene_gen_net'](
-                hidden_states=noisy_latents,
-                timestep=timesteps,
-                encoder_hidden_states=prompt_embeds,
-                pooled_projections=pooled_zeros,
+                hidden_states=scene_noisy_latents,
+                timestep=scene_timesteps,
+                encoder_hidden_states=scene_prompt_embeds,
+                pooled_projections=scene_pooled_zeros,
                 controlnet_cond=scene_controlnet_input,
+                conditioning_scale=1.0,
                 return_dict=False
             )
             scene_block_samples = scene_control_output[0]
 
-            # Get TextRenderNet residuals (expects 16 channels: latent only)
+            # Get TextRenderNet residuals  
+            # text_render_net is now FP32
+            text_noisy_latents = noisy_latents.to(dtype=torch.float32)
+            text_timesteps = timesteps.to(device=text_noisy_latents.device)
+            text_pooled_zeros = pooled_zeros.to(dtype=torch.float32)
+            text_controlnet_input = text_controlnet_input.to(dtype=torch.float32)
+            
             text_control_output = self.models['text_render_net'](
-                hidden_states=noisy_latents,  
-                timestep=timesteps,
-                encoder_hidden_states=text_render_features,
-                pooled_projections=pooled_zeros,
+                hidden_states=text_noisy_latents,  
+                timestep=text_timesteps,
+                encoder_hidden_states=texts_embeds,  # Already converted to proper dtype above
+                pooled_projections=text_pooled_zeros,
                 controlnet_cond=text_controlnet_input,
+                conditioning_scale=1.0,
                 return_dict=False
             )
             text_block_samples = text_control_output[0]
 
-            # Combine residuals from both controlnets
-            # As per PosterMaker pipeline, we add the residuals together
+            
+            # Ensure compatible dtypes before combining block samples
+            # Convert text_block_samples to FP16 to match scene_block_samples
+            text_block_samples = [sample.to(dtype=torch.float16) for sample in text_block_samples]
+            
+            block_interval = (len(scene_block_samples) + 1) // len(text_block_samples)
             control_block_samples = []
-            for scene_sample, text_sample in zip(scene_block_samples, text_block_samples):
-                control_block_samples.append(scene_sample + text_sample)
-            control_block_samples = tuple(control_block_samples)
+            for block_i in range(len(scene_block_samples)):
+                control_block_sample = scene_block_samples[block_i] + text_block_samples[block_i // block_interval]
+                control_block_samples.append(control_block_sample)
+            
+            # Clear intermediate ControlNet variables
+            del scene_block_samples, text_block_samples
+            torch.cuda.empty_cache()
                 
         except Exception as e:
             logger.error(f"Error in ControlNet processing: {e}")
-            # Fallback to no control guidance
+            # Fallback to no control guidance with proper dtype
             control_block_samples = None
         
         # 6. Predict noise with the main SD3 Transformer
         try:
             # Main SD3 uses standard CLIP+T5 prompt encoding
             # IDS text features influence through TextRenderNet residuals, not direct input
+            # Ensure all inputs match transformer dtype (FP16)
+            noisy_latents = noisy_latents.to(dtype=torch.float16)
+            timesteps = timesteps.to(device=noisy_latents.device)
+            prompt_embeds = prompt_embeds.to(dtype=torch.float16)
+            pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=torch.float16)
+            
+            # Ensure ControlNet outputs match transformer dtype if they exist
+            if control_block_samples is not None:
+                if isinstance(control_block_samples, (list, tuple)):
+                    control_block_samples = [s.to(dtype=torch.float16) for s in control_block_samples]
+                else:
+                    control_block_samples = control_block_samples.to(dtype=torch.float16)
+            
             model_pred = self.models['transformer'](
                 hidden_states=noisy_latents,
                 timestep=timesteps,
@@ -636,15 +724,12 @@ class Trainer:
         # Check gradient norms to ensure gradients are flowing
         total_grad_norm = 0
         grad_count = 0
-        for name, param in self.models['ids_text_embedder'].named_parameters():
-            if param.requires_grad and param.grad is not None:
-                total_grad_norm += param.grad.norm().item() ** 2
-                grad_count += 1
-        
-        for name, param in self.models['adapter'].named_parameters():
-            if param.requires_grad and param.grad is not None:
-                total_grad_norm += param.grad.norm().item() ** 2
-                grad_count += 1
+        # Check gradients for all trainable models
+        for model_name in ['ids_text_embedder', 'adapter', 'text_render_net']:
+            for name, param in self.models[model_name].named_parameters():
+                if param.requires_grad and param.grad is not None:
+                    total_grad_norm += param.grad.norm().item() ** 2
+                    grad_count += 1
         
         if grad_count > 0:
             total_grad_norm = (total_grad_norm / grad_count) ** 0.5
@@ -716,9 +801,8 @@ class Trainer:
         Returns:
             torch.Tensor: Computed loss value
         """
-        if 'conditioning_mask' in batch:
-            logger.info("Calculating loss with conditioning mask.")
-            text_mask = batch['conditioning_mask'].float()  # Ensure float type
+        if 'text_mask' in batch:
+            text_mask = batch['text_mask'].float()  # Ensure float type
             
             # Resize mask to match latent dimensions
             latent_h, latent_w = predicted_noise.shape[2], predicted_noise.shape[3]
@@ -735,21 +819,19 @@ class Trainer:
             # Calculate MSE loss only on masked regions
             # Use sum reduction and normalize by the number of masked pixels
             total_loss = F.mse_loss(
-                masked_predicted.float(), 
-                masked_target.float(), 
+                masked_predicted, 
+                masked_target, 
                 reduction="sum"
             ) / (text_mask_latent.sum() + 1e-8)  # Avoid division by zero
             
-            print(f"Text mask coverage: {text_mask_latent.mean().item():.4f} ({text_mask_latent.sum().item():.0f} pixels)")
             
         else:
             # Fallback: calculate loss on full image if no mask available
             total_loss = F.mse_loss(
-                predicted_noise.float(), 
-                target_noise.float(), 
+                predicted_noise, 
+                target_noise, 
                 reduction="mean"
             )
-            print("Warning: No conditioning_mask found, using full image loss")
         
         
         return total_loss
@@ -759,9 +841,9 @@ class Trainer:
         """Performs a full validation loop."""
         self.models['ids_text_embedder'].eval()
         self.models['adapter'].eval()
+        self.models['text_render_net'].eval()  # Also set to eval for validation
         self.models['vae'].eval()
         self.models['transformer'].eval()
-        self.models['text_render_net'].eval()
         self.models['scene_gen_net'].eval()
         
         total_val_loss = 0
@@ -777,9 +859,9 @@ class Trainer:
         # Restore model modes: trainable models to train, frozen models to eval
         self.models['ids_text_embedder'].train()
         self.models['adapter'].train()
+        self.models['text_render_net'].train()  # Back to train mode
         self.models['vae'].eval()
         self.models['transformer'].eval()
-        self.models['text_render_net'].eval()
         self.models['scene_gen_net'].eval()
         
         return avg_val_loss
@@ -792,7 +874,8 @@ class Trainer:
         # Save trainable model state dicts
         trainable_models = {
             "ids_text_embedder": self.models['ids_text_embedder'],
-            "adapter": self.models['adapter']
+            "adapter": self.models['adapter'],
+            "text_render_net": self.models['text_render_net']
         }
         
         if is_best:
@@ -847,3 +930,41 @@ class Trainer:
         metrics_path = self.log_dir / 'training_metrics.json'
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
+
+def main():
+    """Main training function"""
+    from setup import setup_all
+    
+    config_path = 'config.yaml'
+    
+    try:
+        print("trainer start.")
+        # Setup all components
+        components = setup_all(config_path)
+        
+        # Initialize trainer
+        trainer = Trainer(
+            config=components['config'],
+            models=components['models'],
+            tokenizers=components['tokenizers'],
+            train_dataloader=components['train_dataloader'],
+            val_dataloader=components['val_dataloader'],
+            optimizer=components['optimizer'],
+            lr_scheduler=components['lr_scheduler'],
+            device=components['device'],
+            scheduler=components['scheduler']
+        )
+        
+        trainer.train()
+
+    except Exception as e:
+        print(f"Training failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+if __name__ == "__main__":
+    main()

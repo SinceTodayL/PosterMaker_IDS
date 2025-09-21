@@ -1,10 +1,11 @@
 """
-Utility functions for text processing and coordinate handling
+utility functions
 """
 
 import torch
 import numpy as np
 from typing import List, Tuple, Union
+from PIL import Image, ImageOps
 
 
 def normalize_coordinates(coords: List[float], width: int, height: int) -> List[float]:
@@ -12,12 +13,12 @@ def normalize_coordinates(coords: List[float], width: int, height: int) -> List[
     Normalize coordinates to [0, 1] range based on image dimensions.
     
     Args:
-        coords: Coordinates in format [x, y, w, h] or [x1, y1, x2, y2]
+        coords: Coordinates in format [x, y, w, h]
         width: Image width
         height: Image height
         
     Returns:
-        Normalized coordinates
+        Normalized coordinates [x/width, y/height, w/width, h/height]
     """
     if len(coords) == 4:
         x, y, w, h = coords
@@ -46,28 +47,6 @@ def pos2coords(pos: List[Union[int, float]]) -> List[float]:
     h = y2 - y1
     
     return [float(x), float(y), float(w), float(h)]
-
-
-def coords2pos(coords: List[Union[int, float]]) -> List[float]:
-    """
-    Convert coordinates from [x, y, w, h] format to [x1, y1, x2, y2] format.
-    
-    Args:
-        coords: Coordinates in [x, y, w, h] format
-        
-    Returns:
-        Position in [x1, y1, x2, y2] format
-    """
-    if len(coords) != 4:
-        raise ValueError(f"Expected 4 coordinate values, got {len(coords)}")
-    
-    x, y, w, h = coords
-    x1 = x
-    y1 = y
-    x2 = x + w
-    y2 = y + h
-    
-    return [float(x1), float(y1), float(x2), float(y2)]
 
 
 def get_positional_encoding(max_len: int, d_model: int) -> torch.Tensor:
@@ -120,76 +99,30 @@ def create_text_mask(text_positions: List[List[int]], image_size: Tuple[int, int
     return mask
 
 
-def mask_image_region(image: torch.Tensor, mask: torch.Tensor, 
-                     fill_value: float = 0.0) -> torch.Tensor:
-    """
-    Mask specific regions of an image.
+def resize_keep_ratio(image: Image.Image, target_size: Tuple[int, int]) -> Tuple[Image.Image, float, int, int]:
+    """Resize image keeping aspect ratio and pad to target size (PosterMaker style)"""
+    target_w, target_h = target_size
+    orig_w, orig_h = image.size
     
-    Args:
-        image: Image tensor of shape (C, H, W)
-        mask: Binary mask tensor of shape (1, H, W) or (H, W)
-        fill_value: Value to fill masked regions
-        
-    Returns:
-        Masked image tensor
-    """
-    if mask.dim() == 2:
-        mask = mask.unsqueeze(0)
+    scale = min(target_h / orig_h, target_w / orig_w)
+    new_w, new_h = int(orig_w * scale), int(orig_h * scale)
     
-    masked_image = image.clone()
-    masked_image = masked_image * (1 - mask) + fill_value * mask
+    # Resize image (use BILINEAR for images, NEAREST for masks to preserve mask values)
+    if image.mode == 'L':
+        resized = image.resize((new_w, new_h), Image.NEAREST)  # Preserve binary mask values
+    else:
+        resized = image.resize((new_w, new_h), Image.BILINEAR)  # Smooth interpolation for images
     
-    return masked_image
-
-
-def validate_text_annotation(annotation: dict) -> bool:
-    """
-    Validate text annotation structure.
+    # Create background with white fill (PosterMaker style)
+    if image.mode == 'RGB':
+        padded = Image.new('RGB', (target_w, target_h), (255, 255, 255))
+    else:  # L mode for masks  
+        padded = Image.new(image.mode, (target_w, target_h), 255)
     
-    Args:
-        annotation: Annotation dictionary
-        
-    Returns:
-        True if annotation is valid
-    """
-    required_keys = ['prompt', 'texts']
+    # Paste at top-left corner (0, 0) - PosterMaker style
+    padded.paste(resized, (0, 0))
     
-    # Check required keys exist
-    for key in required_keys:
-        if key not in annotation:
-            return False
-    
-    # Check prompt is not empty
-    if not annotation['prompt'] or not isinstance(annotation['prompt'], str):
-        return False
-    
-    # Check texts structure
-    if not isinstance(annotation['texts'], list) or len(annotation['texts']) == 0:
-        return False
-    
-    # Validate each text item
-    for text_item in annotation['texts']:
-        if not isinstance(text_item, dict):
-            return False
-        
-        # Check required fields in text item
-        if 'content' not in text_item or 'pos' not in text_item:
-            return False
-        
-        # Validate content
-        if not text_item['content'] or not isinstance(text_item['content'], str):
-            return False
-        
-        # Validate position
-        pos = text_item['pos']
-        if not isinstance(pos, list) or len(pos) != 4:
-            return False
-        
-        try:
-            x1, y1, x2, y2 = [int(p) for p in pos]
-            if x2 <= x1 or y2 <= y1:
-                return False
-        except (ValueError, TypeError):
-            return False
-    
-    return True
+    # Return actual padding info (top-left alignment means right/bottom padding)
+    pad_right = target_w - new_w
+    pad_bottom = target_h - new_h
+    return padded, scale, pad_right, pad_bottom

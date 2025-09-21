@@ -10,8 +10,8 @@ import logging
 
 # Set up logging
 logger = logging.getLogger(__name__)
-from ..utils.ids_tokenizer import IDSTokenizer
-from ..utils.text_utils import normalize_coordinates, pos2coords, get_positional_encoding
+from utils.ids_tokenizer import IDSTokenizer
+from utils.utils import normalize_coordinates, pos2coords, get_positional_encoding
 
 
 class IDSEmbedding(nn.Module):
@@ -353,7 +353,7 @@ class IDSTextEmbedder(nn.Module):
         for i in range(len(text_features)):
             coords = pos2coords(texts[i]['pos'])  # xyxy -> xywh
             coords_norm = torch.tensor(
-                normalize_coordinates(coords, self.input_size[1], self.input_size[0]), 
+                normalize_coordinates(coords, self.input_size[0], self.input_size[1]), 
                 device=device
             )
             text_coords_embed = self.fourier_embedder(coords_norm)  # 32
@@ -448,7 +448,7 @@ class IDSTextEmbedder(nn.Module):
                 # Clamp values to prevent overflow and convert safely
                 text_pos_clamped = torch.clamp(text_pos[batch_idx], min=-1e6, max=1e6)
                 coords = pos2coords(text_pos_clamped.cpu().numpy().astype(np.float32))  # Convert to xywh
-                coords_norm = normalize_coordinates(coords, self.input_size[1], self.input_size[0])
+                coords_norm = normalize_coordinates(coords, self.input_size[0], self.input_size[1])
                 text_coords_embed = self.fourier_embedder(torch.tensor(coords_norm, device=device, dtype=torch.float32))  # (32,)
             except (OverflowError, ValueError) as e:
                 # Fallback to zero coordinates if conversion fails

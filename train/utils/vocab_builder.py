@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Dict, Set, Optional
 from pathlib import Path
-from .ids_query import IDSQuery
+from utils.ids_query import IDSQuery
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)

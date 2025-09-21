@@ -44,8 +44,6 @@ class LinearAdapterWithLayerNorm(nn.Module):
         # Then through layer normalization
         x = self.layer_norm(x)
         return x
-
-
 class MLPAdapter(nn.Module):
     """
     Multi-layer perceptron adapter for more complex feature transformation.
@@ -90,3 +88,4 @@ class MLPAdapter(nn.Module):
             torch.Tensor: Output tensor of shape (..., projection_dim)
         """
         return self.mlp(x)
+

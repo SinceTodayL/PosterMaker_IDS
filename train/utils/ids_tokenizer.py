@@ -7,8 +7,8 @@ import logging
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 import torch
-from .ids_query import IDSQuery
-from .vocab_builder import IDSVocabBuilder, build_ids_vocabulary
+from utils.ids_query import IDSQuery
+from utils.vocab_builder import IDSVocabBuilder, build_ids_vocabulary
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
