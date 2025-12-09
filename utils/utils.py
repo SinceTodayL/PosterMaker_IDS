@@ -466,23 +466,68 @@ def check_layout(pos: list, content: str, poslist: list, url: str) -> bool:
 
 
 def filter_samples(samples: List[Dict],
-                   check_layout: Callable[[list, str, list, str], bool]
+                   check_layout: Callable[[list, str, list, str], bool],
+                   gt_images_dir: str = None,
+                   max_caption_words: int = 70
                   ) -> List[Dict]:
     """
     Args:
         samples: List[dict]，每个dict格式参考你的描述
         check_layout: 一个函数，签名为 (pos, content, poslist, url) -> bool
+        gt_images_dir: GT图像目录路径，用于检查图片是否存在
+        max_caption_words: caption最大单词数，默认70
 
     Returns:
         new_samples: 过滤后的samples（list of dict），只保留texts非空项
     """
+    import os
+    from pathlib import Path
+    
+    # 如果提供了gt_images_dir，检查图片是否存在
+    gt_dir_path = Path(gt_images_dir) if gt_images_dir else None
+    if gt_dir_path and not gt_dir_path.exists():
+        print(f"Warning: GT images directory does not exist: {gt_images_dir}")
+        gt_dir_path = None
+    
     filtered_samples = []
+    skipped_no_caption = 0
+    skipped_long_caption = 0
+    skipped_missing_image = 0
+    
     for sample in samples:
+        # 检查1: caption不超过70个单词
+        caption = sample.get('caption', '')
+        if caption:
+            words = caption.split()
+            if len(words) > max_caption_words:
+                skipped_long_caption += 1
+                continue
+        else:
+            skipped_no_caption += 1
+            continue
+        
+        # 检查2: 图片url必须在gt目录中存在
+        url = sample.get('url', "")
+        if url and gt_dir_path:
+            # 检查多种可能的图片扩展名
+            image_path = None
+            for ext in ['.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG']:
+                potential_path = gt_dir_path / url if not url.endswith(ext) else gt_dir_path / (url if url.endswith(ext) else url + ext)
+                if potential_path.exists():
+                    image_path = potential_path
+                    break
+            
+            if image_path is None:
+                # 尝试直接使用url作为文件名
+                if not (gt_dir_path / url).exists():
+                    skipped_missing_image += 1
+                    continue
+        
+        # 原有的texts过滤逻辑
         texts_keep = []
         texts_del = []
         texts = sample.get('texts', [])
         poslist = [t['pos'] for t in texts]
-        url = sample.get('url', "")
         for text in texts:
             pos = text['pos']
             content = text['content']
@@ -490,10 +535,22 @@ def filter_samples(samples: List[Dict],
                 texts_keep.append(text)
             else:
                 texts_del.append(text)
+        
         if texts_keep:  # 只保留有剩余texts的sample
             sample_new = dict(sample)  # 浅拷贝以免影响原数据
             sample_new['texts'] = texts_keep
             sample_new['texts_out'] = texts_del if texts_del else None
             filtered_samples.append(sample_new)
+    
+    # 打印过滤统计信息
+    if skipped_no_caption > 0 or skipped_long_caption > 0 or skipped_missing_image > 0:
+        print(f"Filter statistics:")
+        if skipped_no_caption > 0:
+            print(f"  - Skipped {skipped_no_caption} samples without caption")
+        if skipped_long_caption > 0:
+            print(f"  - Skipped {skipped_long_caption} samples with caption > {max_caption_words} words")
+        if skipped_missing_image > 0:
+            print(f"  - Skipped {skipped_missing_image} samples with missing images in GT directory")
+        print(f"  - Final filtered samples: {len(filtered_samples)}")
             
     return filtered_samples

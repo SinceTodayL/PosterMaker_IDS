@@ -24,7 +24,13 @@ class Poster_Dataset(data.Dataset):
         with open(DATA_SAMPLES_PATH, 'r', encoding='utf-8') as f:
             self.samples = json.load(f)
 
-        self.samples = filter_samples(self.samples, check_layout)
+        # 添加caption和图片存在性检查
+        self.samples = filter_samples(
+            self.samples, 
+            check_layout,
+            gt_images_dir=GT_IM_SAVE_PATH,
+            max_caption_words=70
+        )
 
         '''
         self.samples: List of dict

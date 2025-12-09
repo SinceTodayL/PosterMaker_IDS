@@ -19,7 +19,7 @@ TRAIN_ARGS="--output_dir=./outputs \
 --lr_scheduler=constant_with_warmup \
 --adam_epsilon=1e-15 \
 --dataloader_num_workers=10 \
---checkpointing_steps=100 \
+--checkpointing_steps=10 \
 --validation_steps=1000 \
 --resolution_h=1024 \
 --resolution_w=1024 \
